@@ -324,3 +324,22 @@
 	0% { transform: rotate(0deg); }
 	100% { transform: rotate(360deg); }
 }
+
+/* Reading view styles */
+.marginalia-highlight-reading {
+	cursor: pointer;
+	transition: background-color 0.2s;
+	border-radius: 2px;
+}
+
+.marginalia-highlight-reading:hover {
+	opacity: 0.8;
+}
+
+.marginalia-reading-line {
+	transition: background-color 0.2s;
+}
+
+.marginalia-reading-line:hover {
+	background-color: var(--background-modifier-hover);
+}

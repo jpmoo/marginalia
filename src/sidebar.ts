@@ -115,6 +115,11 @@ export class MarginaliaView extends ItemView {
 	}
 
 	async onClose() {
+		// Clean up event listeners
+		const closeHandler = (this as any).sortDropdownCloseHandler;
+		if (closeHandler) {
+			document.removeEventListener('click', closeHandler);
+		}
 		this.contentEl.empty();
 	}
 
@@ -137,10 +142,19 @@ export class MarginaliaView extends ItemView {
 	private refreshCurrentNote(contentArea: HTMLElement) {
 		const activeFile = this.app.workspace.getActiveFile();
 		
-		// Always create search input at the top
-		const searchContainer = contentArea.createDiv();
-		searchContainer.style.marginBottom = '10px';
+		// Create search and controls container at the top
+		const topControlsContainer = contentArea.createDiv();
+		topControlsContainer.style.marginBottom = '10px';
+		topControlsContainer.style.display = 'flex';
+		topControlsContainer.style.gap = '8px';
+		topControlsContainer.style.alignItems = 'center';
+		
+		// Search input container (flexible)
+		const searchContainer = topControlsContainer.createDiv();
+		searchContainer.style.flex = '1';
 		searchContainer.style.position = 'relative';
+		searchContainer.style.display = 'flex';
+		searchContainer.style.alignItems = 'center';
 		
 		const currentNoteSearchInput = searchContainer.createEl('input', {
 			attr: {
@@ -189,6 +203,108 @@ export class MarginaliaView extends ItemView {
 			renderFilteredItems();
 		};
 		
+		// Sort button with dropdown
+		const sortButtonContainer = topControlsContainer.createDiv();
+		sortButtonContainer.style.position = 'relative';
+		sortButtonContainer.style.flexShrink = '0';
+		
+		const sortButton = sortButtonContainer.createEl('button');
+		sortButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M7 12h10"/><path d="M10 18h4"/></svg>';
+		sortButton.title = 'Sort options';
+		sortButton.style.padding = '4px 6px';
+		sortButton.style.border = '1px solid var(--background-modifier-border)';
+		sortButton.style.borderRadius = '4px';
+		sortButton.style.background = 'var(--background-primary)';
+		sortButton.style.cursor = 'pointer';
+		sortButton.style.height = 'auto';
+		sortButton.style.minHeight = 'auto';
+		sortButton.style.width = '32px';
+		sortButton.style.display = 'flex';
+		sortButton.style.alignItems = 'center';
+		sortButton.style.justifyContent = 'center';
+		
+		// Dropdown menu (initially hidden)
+		const sortDropdown = sortButtonContainer.createDiv();
+		sortDropdown.style.display = 'none';
+		sortDropdown.style.position = 'absolute';
+		sortDropdown.style.top = '100%';
+		sortDropdown.style.right = '0';
+		sortDropdown.style.marginTop = '4px';
+		sortDropdown.style.backgroundColor = 'var(--background-primary)';
+		sortDropdown.style.border = '1px solid var(--background-modifier-border)';
+		sortDropdown.style.borderRadius = '4px';
+		sortDropdown.style.boxShadow = '0 2px 8px rgba(0, 0, 0, 0.15)';
+		sortDropdown.style.zIndex = '1000';
+		sortDropdown.style.minWidth = '200px';
+		sortDropdown.style.overflow = 'hidden';
+		
+		const currentSortOrder = this.plugin.settings.sortOrder || 'position';
+		
+		// Create menu items
+		const menuItems = [
+			{ value: 'position', label: 'Order in note' },
+			{ value: 'date-asc', label: 'Modified (oldest first)' },
+			{ value: 'date-desc', label: 'Modified (newest first)' }
+		];
+		
+		menuItems.forEach((item) => {
+			const menuItem = sortDropdown.createDiv();
+			menuItem.style.padding = '8px 12px';
+			menuItem.style.cursor = 'pointer';
+			menuItem.style.fontSize = '0.9em';
+			menuItem.style.color = 'var(--text-normal)';
+			menuItem.style.display = 'flex';
+			menuItem.style.alignItems = 'center';
+			menuItem.style.gap = '8px';
+			
+			// Checkmark for selected item
+			if (item.value === currentSortOrder) {
+				const checkmark = menuItem.createSpan();
+				checkmark.innerHTML = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l3 3 5-5"/></svg>';
+				checkmark.style.flexShrink = '0';
+				checkmark.style.color = 'var(--text-accent)';
+			} else {
+				const spacer = menuItem.createSpan();
+				spacer.style.width = '14px';
+				spacer.style.flexShrink = '0';
+			}
+			
+			const label = menuItem.createSpan();
+			label.textContent = item.label;
+			
+			menuItem.onmouseenter = () => {
+				menuItem.style.backgroundColor = 'var(--background-modifier-hover)';
+			};
+			menuItem.onmouseleave = () => {
+				menuItem.style.backgroundColor = '';
+			};
+			
+			menuItem.onclick = async (e) => {
+				e.stopPropagation();
+				this.plugin.settings.sortOrder = item.value as 'position' | 'date-asc' | 'date-desc';
+				await this.plugin.saveData(this.plugin.settings);
+				sortDropdown.style.display = 'none';
+				renderFilteredItems();
+			};
+		});
+		
+		// Toggle dropdown on button click
+		sortButton.onmousedown = (e) => {
+			e.stopPropagation();
+			e.preventDefault();
+			const isVisible = sortDropdown.style.display === 'block';
+			sortDropdown.style.display = isVisible ? 'none' : 'block';
+		};
+		
+		// Close dropdown when clicking outside
+		const closeDropdown = (e: MouseEvent) => {
+			if (!sortButtonContainer.contains(e.target as Node)) {
+				sortDropdown.style.display = 'none';
+			}
+		};
+		document.addEventListener('click', closeDropdown);
+		(this as any).sortDropdownCloseHandler = closeDropdown;
+		
 		// Store reference to content area for filtering
 		const itemsContainer = contentArea.createDiv();
 		itemsContainer.style.marginTop = '10px';
@@ -222,58 +338,6 @@ export class MarginaliaView extends ItemView {
 				emptyDiv.textContent = searchLower ? 'No matching marginalia found' : 'No marginalia in this file';
 				return;
 			}
-
-			// Add sort controls
-			const sortControls = itemsContainer.createDiv('marginalia-sort-controls');
-			sortControls.style.display = 'flex';
-			sortControls.style.justifyContent = 'flex-end';
-			sortControls.style.marginBottom = '10px';
-			sortControls.style.alignItems = 'center';
-			sortControls.style.gap = '8px';
-
-			const sortLabel = sortControls.createSpan();
-			sortLabel.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M7 12h10"/><path d="M10 18h4"/></svg>';
-			sortLabel.style.opacity = '0.7';
-			sortLabel.style.display = 'flex';
-			sortLabel.style.alignItems = 'center';
-
-			const sortSelect = sortControls.createEl('select');
-			sortSelect.style.padding = '4px 24px 4px 8px';
-			sortSelect.style.border = '1px solid var(--background-modifier-border)';
-			sortSelect.style.borderRadius = '4px';
-			sortSelect.style.background = 'var(--background-primary)';
-			sortSelect.style.fontSize = '0.9em';
-			sortSelect.style.cursor = 'pointer';
-			sortSelect.style.color = 'var(--text-normal)';
-			sortSelect.style.minWidth = '180px';
-			sortSelect.style.appearance = 'none';
-			sortSelect.style.backgroundImage = 'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'12\' height=\'12\' viewBox=\'0 0 12 12\' fill=\'none\' stroke=\'currentColor\' stroke-width=\'2\' stroke-linecap=\'round\'%3E%3Cpath d=\'M3 4l3 4 3-4\'/%3E%3C/svg%3E")';
-			sortSelect.style.backgroundRepeat = 'no-repeat';
-			sortSelect.style.backgroundPosition = 'right 6px center';
-			sortSelect.style.backgroundSize = '12px';
-			sortSelect.style.transition = 'border-color 0.2s';
-			
-			sortSelect.onmouseenter = () => {
-				sortSelect.style.borderColor = 'var(--background-modifier-border-hover)';
-			};
-			sortSelect.onmouseleave = () => {
-				sortSelect.style.borderColor = 'var(--background-modifier-border)';
-			};
-
-			const optionPosition = sortSelect.createEl('option', { value: 'position' });
-			optionPosition.textContent = 'Order in note';
-			const optionDateAsc = sortSelect.createEl('option', { value: 'date-asc' });
-			optionDateAsc.textContent = 'Date modified (oldest first)';
-			const optionDateDesc = sortSelect.createEl('option', { value: 'date-desc' });
-			optionDateDesc.textContent = 'Date modified (newest first)';
-
-			sortSelect.value = this.plugin.settings.sortOrder || 'position';
-			sortSelect.onchange = async (e) => {
-				const target = e.target as HTMLSelectElement;
-				this.plugin.settings.sortOrder = target.value as 'position' | 'date-asc' | 'date-desc';
-				await this.plugin.saveData(this.plugin.settings);
-				renderFilteredItems(); // Re-render with new sort order
-			};
 
 			// Sort items based on current sort order
 			const sortedItems = [...filteredItems];
@@ -424,8 +488,8 @@ export class MarginaliaView extends ItemView {
 		const topControlsContainer = contentArea.createDiv();
 		topControlsContainer.style.marginBottom = '10px';
 		topControlsContainer.style.display = 'flex';
-		topControlsContainer.style.gap = '10px';
-		topControlsContainer.style.alignItems = 'stretch'; // Stretch to same height
+		topControlsContainer.style.gap = '8px';
+		topControlsContainer.style.alignItems = 'center'; // Center align items
 		
 		// Search input container (flexible)
 		const searchContainer = topControlsContainer.createDiv();
@@ -433,7 +497,6 @@ export class MarginaliaView extends ItemView {
 		searchContainer.style.position = 'relative';
 		searchContainer.style.display = 'flex';
 		searchContainer.style.alignItems = 'center';
-		searchContainer.style.minHeight = '32px'; // Match button height
 		
 		const searchInput = searchContainer.createEl('input', {
 			attr: {
@@ -474,17 +537,22 @@ export class MarginaliaView extends ItemView {
 			renderFilteredTree();
 		};
 		
-		// Expand/collapse buttons container (next to search)
-		const controlsDiv = topControlsContainer.createDiv('marginalia-tree-controls');
-		controlsDiv.style.display = 'flex';
-		controlsDiv.style.gap = '5px';
-		controlsDiv.style.flexShrink = '0';
-		controlsDiv.style.alignItems = 'center';
-		controlsDiv.style.alignSelf = 'center'; // Center align within flex container
-		
 		// Store reference to tree container for filtering
 		const treeContainer = contentArea.createDiv('marginalia-tree');
 		(this as any).treeContainer = treeContainer;
+		
+		// Track whether all folders are expanded
+		let allExpanded = true;
+		
+		// Function to check if all folders are expanded
+		const checkAllExpanded = (node: TreeNode): boolean => {
+			if (node.children.size === 0) return true;
+			for (const child of node.children.values()) {
+				if (!child.isExpanded) return false;
+				if (!checkAllExpanded(child)) return false;
+			}
+			return true;
+		};
 		
 		// Function to render filtered tree
 		const renderFilteredTree = () => {
@@ -529,7 +597,7 @@ export class MarginaliaView extends ItemView {
 				fullPath: '',
 				children: new Map(),
 				files: [],
-				isExpanded: true
+				isExpanded: allExpanded // Use tracked state
 			};
 			
 			filesWithMarginalia.sort((a: { path: string; count: number }, b: { path: string; count: number }) => a.path.localeCompare(b.path));
@@ -546,7 +614,7 @@ export class MarginaliaView extends ItemView {
 							fullPath: current.fullPath ? `${current.fullPath}/${part}` : part,
 							children: new Map(),
 							files: [],
-							isExpanded: true
+							isExpanded: allExpanded // Use tracked state
 						});
 					}
 					current = current.children.get(part)!;
@@ -556,6 +624,59 @@ export class MarginaliaView extends ItemView {
 			
 			(this as any).treeRoot = root;
 			this.renderTreeNode(treeContainer, root, 0);
+			
+			// Update button state after rendering
+			updateToggleButton();
+		};
+		
+		// Single toggle button for expand/collapse
+		const toggleButton = topControlsContainer.createEl('button');
+		toggleButton.style.flexShrink = '0';
+		toggleButton.style.padding = '4px 6px';
+		toggleButton.style.border = '1px solid var(--background-modifier-border)';
+		toggleButton.style.borderRadius = '4px';
+		toggleButton.style.background = 'var(--background-primary)';
+		toggleButton.style.cursor = 'pointer';
+		toggleButton.style.height = 'auto';
+		toggleButton.style.minHeight = 'auto';
+		toggleButton.style.width = '32px';
+		toggleButton.style.display = 'flex';
+		toggleButton.style.alignItems = 'center';
+		toggleButton.style.justifyContent = 'center';
+		
+		// Function to update button icon and tooltip
+		const updateToggleButton = () => {
+			const treeRoot = (this as any).treeRoot;
+			if (treeRoot) {
+				allExpanded = checkAllExpanded(treeRoot);
+			}
+			if (allExpanded) {
+				// Show collapse icon (> < - pointing outward)
+				toggleButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4l2 2-2 2"/><path d="M11 4l-2 2 2 2"/></svg>';
+				toggleButton.title = 'Collapse all folders';
+			} else {
+				// Show expand icon (<> - pointing outward)
+				toggleButton.innerHTML = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4l-2 2 2 2"/><path d="M11 4l2 2-2 2"/></svg>';
+				toggleButton.title = 'Expand all folders';
+			}
+		};
+		
+		// Store reference for use in renderTreeNode
+		(this as any).updateToggleButtonRef = updateToggleButton;
+		
+		// Initialize button state
+		updateToggleButton();
+		
+		// Toggle button handler
+		toggleButton.onmousedown = (e) => {
+			e.stopPropagation();
+			e.preventDefault();
+			const treeRoot = (this as any).treeRoot;
+			if (treeRoot) {
+				allExpanded = !allExpanded;
+				this.setAllExpanded(treeRoot, allExpanded);
+				renderFilteredTree();
+			}
 		};
 		
 		// Update search term and filter on input (without full refresh)
@@ -564,50 +685,6 @@ export class MarginaliaView extends ItemView {
 			this.searchTerm = target.value;
 			clearButton.style.display = target.value ? 'block' : 'none';
 			renderFilteredTree();
-		};
-		
-		const expandAllBtn = controlsDiv.createEl('button');
-		expandAllBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="7" y1="3" x2="7" y2="11"/><line x1="3" y1="7" x2="11" y2="7"/></svg>';
-		expandAllBtn.title = 'Expand all';
-		expandAllBtn.style.padding = '6px 8px';
-		expandAllBtn.style.border = '1px solid var(--background-modifier-border)';
-		expandAllBtn.style.borderRadius = '4px';
-		expandAllBtn.style.background = 'var(--background-primary)';
-		expandAllBtn.style.cursor = 'pointer';
-		expandAllBtn.style.height = '32px'; // Match search input height
-		expandAllBtn.style.display = 'flex';
-		expandAllBtn.style.alignItems = 'center';
-		expandAllBtn.style.justifyContent = 'center';
-		
-		const collapseAllBtn = controlsDiv.createEl('button');
-		collapseAllBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="7" x2="11" y2="7"/></svg>';
-		collapseAllBtn.title = 'Collapse all';
-		collapseAllBtn.style.padding = '6px 8px';
-		collapseAllBtn.style.border = '1px solid var(--background-modifier-border)';
-		collapseAllBtn.style.borderRadius = '4px';
-		collapseAllBtn.style.background = 'var(--background-primary)';
-		collapseAllBtn.style.cursor = 'pointer';
-		collapseAllBtn.style.height = '32px'; // Match search input height
-		collapseAllBtn.style.display = 'flex';
-		collapseAllBtn.style.alignItems = 'center';
-		collapseAllBtn.style.justifyContent = 'center';
-		
-		// Expand all handler
-		expandAllBtn.onclick = () => {
-			const treeRoot = (this as any).treeRoot;
-			if (treeRoot) {
-				this.setAllExpanded(treeRoot, true);
-				renderFilteredTree();
-			}
-		};
-
-		// Collapse all handler
-		collapseAllBtn.onclick = () => {
-			const treeRoot = (this as any).treeRoot;
-			if (treeRoot) {
-				this.setAllExpanded(treeRoot, false);
-				renderFilteredTree();
-			}
 		};
 		
 		// Initial render
@@ -672,6 +749,11 @@ export class MarginaliaView extends ItemView {
 				if (treeContainer && treeRoot) {
 					treeContainer.empty();
 					this.renderTreeNode(treeContainer, treeRoot, 0);
+					// Update toggle button state after individual folder click
+					const updateFn = (this as any).updateToggleButtonRef;
+					if (updateFn) {
+						updateFn();
+					}
 				}
 			};
 

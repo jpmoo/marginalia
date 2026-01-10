@@ -68,6 +68,121 @@ export default class MarginaliaPlugin extends Plugin {
 		// Register editor extension
 		this.registerEditorExtension(MarginaliaEditorExtension(this));
 
+		// Register markdown post-processor for reading view
+		const plugin = this;
+		this.registerMarkdownPostProcessor((element, context) => {
+			const filePath = context.sourcePath;
+			if (!filePath) return;
+			
+			const items = plugin.getMarginalia(filePath);
+			if (items.length === 0) return;
+			
+			// Get the markdown content to map positions
+			const markdownContent = context.getSectionInfo(element)?.text || '';
+			if (!markdownContent) return;
+			
+			// Process each marginalia item
+			for (const item of items) {
+				try {
+					// Get the text selection from the item
+					const selectionText = item.text;
+					if (!selectionText || selectionText.trim().length === 0) {
+						// For cursor-only notes, we'll add a line indicator
+						// Find the line in the rendered HTML
+						const lineNum = item.from.line;
+						const lines = element.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, blockquote, code');
+						if (lines[lineNum]) {
+							const lineEl = lines[lineNum] as HTMLElement;
+							const itemColor = item.color || this.settings.highlightColor;
+							const itemTransparency = this.settings.transparency || 0.5;
+							const rgb = this.hexToRgb(itemColor);
+							const rgbaColor = rgb ? `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${itemTransparency})` : itemColor;
+							
+							// Add a left border indicator
+							lineEl.style.borderLeft = `3px solid ${itemColor}`;
+							lineEl.style.paddingLeft = '8px';
+							lineEl.style.position = 'relative';
+							lineEl.setAttribute('data-marginalia-id', item.id);
+							lineEl.setAttribute('data-note', item.note);
+							lineEl.classList.add('marginalia-reading-line');
+							lineEl.style.cursor = 'pointer';
+							
+							// Add hover tooltip
+							lineEl.addEventListener('mouseenter', (e) => {
+								plugin.showReadingTooltip(lineEl, item.note, e);
+							});
+							lineEl.addEventListener('mouseleave', () => {
+								plugin.hideReadingTooltip();
+							});
+							
+							// Add click handler to jump to location
+							lineEl.addEventListener('click', () => {
+								plugin.jumpToMarginalia(filePath, item.id);
+							});
+						}
+					} else {
+						// For text selections, find and highlight the text
+						// Walk through text nodes and find matching text
+						const walker = document.createTreeWalker(
+							element,
+							NodeFilter.SHOW_TEXT,
+							null
+						);
+						
+						let node;
+						while (node = walker.nextNode()) {
+							const text = node.textContent || '';
+							if (text.includes(selectionText)) {
+								// Found matching text - wrap it in a highlight span
+								const parent = node.parentElement;
+								if (parent) {
+									const itemColor = item.color || plugin.settings.highlightColor;
+									const itemTransparency = plugin.settings.transparency || 0.5;
+									const rgb = plugin.hexToRgb(itemColor);
+									const rgbaColor = rgb ? `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${itemTransparency})` : itemColor;
+									
+									// Create highlight span
+									const highlight = document.createElement('span');
+									highlight.className = 'marginalia-highlight-reading';
+									highlight.style.backgroundColor = rgbaColor;
+									highlight.style.cursor = 'pointer';
+									highlight.setAttribute('data-marginalia-id', item.id);
+									highlight.setAttribute('data-note', item.note);
+									
+									// Replace text node with highlighted version
+									const range = document.createRange();
+									range.selectNodeContents(node);
+									const textIndex = text.indexOf(selectionText);
+									if (textIndex >= 0) {
+										range.setStart(node, textIndex);
+										range.setEnd(node, textIndex + selectionText.length);
+										range.surroundContents(highlight);
+										
+										// Add hover tooltip
+										highlight.addEventListener('mouseenter', (e) => {
+											plugin.showReadingTooltip(highlight, item.note, e);
+										});
+										highlight.addEventListener('mouseleave', () => {
+											plugin.hideReadingTooltip();
+										});
+										
+										// Add click handler
+										highlight.addEventListener('click', () => {
+											plugin.jumpToMarginalia(filePath, item.id);
+										});
+										
+										break; // Only highlight first occurrence
+									}
+								}
+							}
+						}
+					}
+				} catch (e) {
+					console.error('Error processing marginalia in reading view:', e);
+				}
+			}
+		});
+
 		// Register context menu item
 		this.registerEvent(
 			this.app.workspace.on('editor-menu', (menu, editor, view) => {
@@ -279,7 +394,10 @@ export default class MarginaliaPlugin extends Plugin {
 			data.items = data.items.filter(i => i.id !== id);
 			await this.saveMarginaliaForFile(filePath);
 			
+			// Immediately refresh editor and reading view
 			this.refreshEditor(filePath);
+			this.refreshReadingView(filePath);
+			
 			if (this.sidebarView) {
 				this.sidebarView.refresh();
 			}
@@ -509,12 +627,13 @@ export default class MarginaliaPlugin extends Plugin {
 		for (const leaf of leaves) {
 			const view = leaf.view as MarkdownView;
 			if (view.file && view.file.path === filePath) {
-				// Force editor to refresh by triggering a viewport update
+				// Force editor to refresh immediately
 				const editor = view.editor;
 				if (editor) {
 					// Get marginalia items and trigger a refresh
 					const items = this.getMarginalia(filePath);
-					// Use requestAnimationFrame to ensure DOM is ready
+					// Immediately trigger a refresh by dispatching a viewport change
+					// This forces the ViewPlugin to update
 					requestAnimationFrame(() => {
 						// Trigger a refresh by reading and setting cursor
 						const cursor = editor.getCursor();
@@ -529,6 +648,54 @@ export default class MarginaliaPlugin extends Plugin {
 					});
 				}
 			}
+		}
+		
+		// Also refresh reading view if open
+		this.refreshReadingView(filePath);
+	}
+	
+	public refreshReadingView(filePath: string) {
+		// Refresh reading view by re-rendering the markdown
+		const leaves = this.app.workspace.getLeavesOfType("markdown");
+		for (const leaf of leaves) {
+			const view = leaf.view as MarkdownView;
+			if (view.file && view.file.path === filePath) {
+				// Force markdown renderer to refresh
+				if ((view as any).previewMode) {
+					// Reading view - trigger a refresh
+					const previewMode = (view as any).previewMode;
+					if (previewMode && previewMode.rerender) {
+						previewMode.rerender(true);
+					}
+				}
+			}
+		}
+	}
+	
+	private readingTooltip: HTMLElement | null = null;
+	
+	public showReadingTooltip(element: HTMLElement, note: string, event: MouseEvent) {
+		if (!note) return;
+		
+		this.hideReadingTooltip();
+		
+		this.readingTooltip = document.createElement('div');
+		this.readingTooltip.className = 'marginalia-tooltip';
+		this.readingTooltip.textContent = note;
+		
+		document.body.appendChild(this.readingTooltip);
+		
+		const rect = element.getBoundingClientRect();
+		this.readingTooltip.style.position = 'absolute';
+		this.readingTooltip.style.left = `${rect.left}px`;
+		this.readingTooltip.style.top = `${rect.bottom + 5}px`;
+		this.readingTooltip.style.zIndex = '10000';
+	}
+	
+	public hideReadingTooltip() {
+		if (this.readingTooltip) {
+			this.readingTooltip.remove();
+			this.readingTooltip = null;
 		}
 	}
 
