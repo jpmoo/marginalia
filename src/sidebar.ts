@@ -238,61 +238,73 @@ export class MarginaliaView extends ItemView {
 		sortDropdown.style.minWidth = '200px';
 		sortDropdown.style.overflow = 'hidden';
 		
-		const currentSortOrder = this.plugin.settings.sortOrder || 'position';
+		// Function to update dropdown menu items with current sort order
+		const updateSortDropdown = () => {
+			sortDropdown.empty();
+			const currentSortOrder = this.plugin.settings.sortOrder || 'position';
+			
+			// Create menu items
+			const menuItems = [
+				{ value: 'position', label: 'Order in note' },
+				{ value: 'date-asc', label: 'Modified (oldest first)' },
+				{ value: 'date-desc', label: 'Modified (newest first)' }
+			];
+			
+			menuItems.forEach((item) => {
+				const menuItem = sortDropdown.createDiv();
+				menuItem.style.padding = '8px 12px';
+				menuItem.style.cursor = 'pointer';
+				menuItem.style.fontSize = '0.9em';
+				menuItem.style.color = 'var(--text-normal)';
+				menuItem.style.display = 'flex';
+				menuItem.style.alignItems = 'center';
+				menuItem.style.gap = '8px';
+				
+				// Checkmark for selected item
+				if (item.value === currentSortOrder) {
+					const checkmark = menuItem.createSpan();
+					checkmark.innerHTML = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l3 3 5-5"/></svg>';
+					checkmark.style.flexShrink = '0';
+					checkmark.style.color = 'var(--text-accent)';
+				} else {
+					const spacer = menuItem.createSpan();
+					spacer.style.width = '14px';
+					spacer.style.flexShrink = '0';
+				}
+				
+				const label = menuItem.createSpan();
+				label.textContent = item.label;
+				
+				menuItem.onmouseenter = () => {
+					menuItem.style.backgroundColor = 'var(--background-modifier-hover)';
+				};
+				menuItem.onmouseleave = () => {
+					menuItem.style.backgroundColor = '';
+				};
+				
+				menuItem.onclick = async (e) => {
+					e.stopPropagation();
+					this.plugin.settings.sortOrder = item.value as 'position' | 'date-asc' | 'date-desc';
+					await this.plugin.saveData(this.plugin.settings);
+					sortDropdown.style.display = 'none';
+					updateSortDropdown(); // Update dropdown to show new selection
+					renderFilteredItems();
+				};
+			});
+		};
 		
-		// Create menu items
-		const menuItems = [
-			{ value: 'position', label: 'Order in note' },
-			{ value: 'date-asc', label: 'Modified (oldest first)' },
-			{ value: 'date-desc', label: 'Modified (newest first)' }
-		];
-		
-		menuItems.forEach((item) => {
-			const menuItem = sortDropdown.createDiv();
-			menuItem.style.padding = '8px 12px';
-			menuItem.style.cursor = 'pointer';
-			menuItem.style.fontSize = '0.9em';
-			menuItem.style.color = 'var(--text-normal)';
-			menuItem.style.display = 'flex';
-			menuItem.style.alignItems = 'center';
-			menuItem.style.gap = '8px';
-			
-			// Checkmark for selected item
-			if (item.value === currentSortOrder) {
-				const checkmark = menuItem.createSpan();
-				checkmark.innerHTML = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l3 3 5-5"/></svg>';
-				checkmark.style.flexShrink = '0';
-				checkmark.style.color = 'var(--text-accent)';
-			} else {
-				const spacer = menuItem.createSpan();
-				spacer.style.width = '14px';
-				spacer.style.flexShrink = '0';
-			}
-			
-			const label = menuItem.createSpan();
-			label.textContent = item.label;
-			
-			menuItem.onmouseenter = () => {
-				menuItem.style.backgroundColor = 'var(--background-modifier-hover)';
-			};
-			menuItem.onmouseleave = () => {
-				menuItem.style.backgroundColor = '';
-			};
-			
-			menuItem.onclick = async (e) => {
-				e.stopPropagation();
-				this.plugin.settings.sortOrder = item.value as 'position' | 'date-asc' | 'date-desc';
-				await this.plugin.saveData(this.plugin.settings);
-				sortDropdown.style.display = 'none';
-				renderFilteredItems();
-			};
-		});
+		// Initialize dropdown
+		updateSortDropdown();
 		
 		// Toggle dropdown on button click
 		sortButton.onmousedown = (e) => {
 			e.stopPropagation();
 			e.preventDefault();
 			const isVisible = sortDropdown.style.display === 'block';
+			if (!isVisible) {
+				// Update dropdown before showing to ensure current selection is shown
+				updateSortDropdown();
+			}
 			sortDropdown.style.display = isVisible ? 'none' : 'block';
 		};
 		

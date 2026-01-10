@@ -24,8 +24,6 @@
 	opacity: 0.9;
 	transition: all 0.2s;
 	position: absolute;
-	right: 0;
-	margin-right: 10px;
 	box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
 	font-weight: bold;
 }
@@ -330,6 +328,7 @@
 	cursor: pointer;
 	transition: background-color 0.2s;
 	border-radius: 2px;
+	display: inline;
 }
 
 .marginalia-highlight-reading:hover {
@@ -338,8 +337,33 @@
 
 .marginalia-reading-line {
 	transition: background-color 0.2s;
+	position: relative;
 }
 
 .marginalia-reading-line:hover {
 	background-color: var(--background-modifier-hover);
+}
+
+.marginalia-icon-reading {
+	position: absolute;
+	top: 50%;
+	transform: translateY(-50%);
+	width: 20px;
+	height: 20px;
+	border-radius: 50%;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	cursor: pointer;
+	font-size: 0.85em;
+	font-weight: bold;
+	box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+	transition: all 0.2s;
+	z-index: 10;
+}
+
+.marginalia-icon-reading:hover {
+	opacity: 1;
+	transform: translateY(-50%) scale(1.1);
+	box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3);
 }

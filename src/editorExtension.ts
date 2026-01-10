@@ -23,7 +23,8 @@ class MarginaliaIconWidget extends WidgetType {
 		private id: string,
 		private plugin: MarginaliaPlugin,
 		private filePath: string,
-		private item: MarginaliaItem
+		private item: MarginaliaItem,
+		private verticalOffset: number = 0 // Offset for stacking multiple icons
 	) {
 		super();
 	}
@@ -36,7 +37,20 @@ class MarginaliaIconWidget extends WidgetType {
 		span.innerHTML = '✎'; // Quill/pen icon
 		span.title = 'Click to edit marginalia note';
 		span.style.position = 'absolute';
-		span.style.right = '0';
+		// Use pen icon position setting
+		const penPosition = this.plugin.settings?.penIconPosition || 'right';
+		if (penPosition === 'left') {
+			span.style.left = '0';
+			span.style.right = 'auto';
+		} else {
+			span.style.right = '0';
+			span.style.left = 'auto';
+		}
+		// Stack vertically if multiple icons on same line
+		// Use margin-top to push icons down when stacked
+		if (this.verticalOffset > 0) {
+			span.style.marginTop = `${this.verticalOffset * 24}px`; // 24px spacing between icons
+		}
 		span.style.cursor = 'pointer';
 		
 		// Use item color or default from settings
@@ -103,6 +117,11 @@ function marginaliaField(plugin: MarginaliaPlugin) {
 					const items = effect.value;
 					// Clear existing decorations first
 					decorations = Decoration.none;
+					
+					// If no items, return empty decorations
+					if (!items || items.length === 0) {
+						return decorations;
+					}
 					const marks: any[] = [];
 					
 					// Get file path from plugin's active file
@@ -140,6 +159,9 @@ function marginaliaField(plugin: MarginaliaPlugin) {
 						item: MarginaliaItem;
 						config: any;
 					}> = [];
+					
+					// Track widgets by line number to stack them vertically
+					const widgetPositions = new Map<number, number>(); // line number -> count
 					
 					// Calculate offset for leading blank lines
 					// Obsidian's editor line numbers exclude leading blank lines, but CodeMirror includes them
@@ -198,9 +220,9 @@ function marginaliaField(plugin: MarginaliaPlugin) {
 								if (showHighlight) {
 									// Use item color or default
 									const itemColor = item.color || plugin.settings?.highlightColor || '#ffeb3d';
-									const itemTransparency = plugin.settings?.transparency || 0.3;
+									const itemOpacity = plugin.settings?.opacity || 0.5;
 									const rgb = hexToRgb(itemColor);
-									const rgbaColor = rgb ? `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${itemTransparency})` : itemColor;
+									const rgbaColor = rgb ? `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${itemOpacity})` : itemColor;
 									
 									decorationInfo.push({
 										from,
@@ -219,23 +241,26 @@ function marginaliaField(plugin: MarginaliaPlugin) {
 									});
 								}
 								
-								// Add icon widget in right margin at the end of the line containing the selection start
+								// Add icon widget at the start of the highlight (top of multi-line selections)
 								if (showPen && filePath) {
-									// Get the line that contains the start of the selection
-									const startLine = tr.state.doc.lineAt(from);
-									// CRITICAL: Widget must be at a position >= mark's 'to' to ensure proper sorting
-									// Use max of line end and mark end to ensure widget is after mark
-									const widgetPos = Math.max(startLine.to, to);
+									// CRITICAL: Position widget 1 character after mark start to avoid sorting conflicts
+									// Since startSide isn't being set correctly, we need different positions
+									// This ensures mark (from=X) comes before widget (from=X+1) in sort order
+									const widgetPos = Math.min(from + 1, to); // Position after mark start, but before mark end
+									const penPosition = plugin.settings?.penIconPosition || 'right';
+									
+									// Track stacking by line number (more reliable than position)
+									const widgetLine = tr.state.doc.lineAt(widgetPos).number;
+									const currentCount = widgetPositions.get(widgetLine) || 0;
+									widgetPositions.set(widgetLine, currentCount + 1);
+									
 									decorationInfo.push({
 										from: widgetPos,
-										side: 1, // startSide: 1 for widgets
+										side: penPosition === 'left' ? -1 : 1, // -1 for left margin, 1 for right margin
 										type: 'widget',
 										item,
 										config: {
-											widget: new MarginaliaIconWidget(item.note, item.id, plugin, filePath, item),
-											side: 1, // This should set startSide: 1 in the Range
-											block: false,
-											margin: '0 0 0 auto'
+											widget: new MarginaliaIconWidget(item.note, item.id, plugin, filePath, item, currentCount)
 										}
 									});
 								}
@@ -251,9 +276,9 @@ function marginaliaField(plugin: MarginaliaPlugin) {
 								
 								// Use item color or default
 								const itemColor = item.color || plugin.settings?.highlightColor || '#ffeb3d';
-								const itemTransparency = plugin.settings?.transparency || 0.3;
+								const itemOpacity = plugin.settings?.opacity || 0.5;
 								const rgb = hexToRgb(itemColor);
-								const rgbaColor = rgb ? `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${itemTransparency})` : itemColor;
+								const rgbaColor = rgb ? `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${itemOpacity})` : itemColor;
 								
 								if (showHighlight && highlightFrom < highlightTo) {
 									// Add a subtle highlight for cursor positions
@@ -307,24 +332,30 @@ function marginaliaField(plugin: MarginaliaPlugin) {
 										widgetPos = from + 1;
 									}
 									// Ensure widget is within line bounds
-									const finalWidgetPos = Math.min(widgetPos, line.to);
+									// Position widget 1 character after the highlight/cursor to avoid sorting conflicts
+									const basePos = showHighlight && highlightFrom < highlightTo ? highlightTo : widgetPos;
+									const finalWidgetPos = Math.min(basePos + 1, line.to);
+									const penPosition = plugin.settings?.penIconPosition || 'right';
+									
+									// Track stacking by line number
+									const widgetLine = line.number;
+									const currentCount = widgetPositions.get(widgetLine) || 0;
+									widgetPositions.set(widgetLine, currentCount + 1);
+									
 									decorationInfo.push({
 										from: finalWidgetPos,
-										side: 1,
+										side: penPosition === 'left' ? -1 : 1, // -1 for left margin, 1 for right margin
 										type: 'widget',
 										item,
 										config: {
-											widget: new MarginaliaIconWidget(item.note, item.id, plugin, filePath, item),
-											side: 1,
-											block: false,
-											margin: '0 0 0 auto'
+											widget: new MarginaliaIconWidget(item.note, item.id, plugin, filePath, item, currentCount)
 										}
 									});
 								}
 							}
 						} catch (e) {
 							// Line might not exist, skip this item
-							console.log('Error adding marginalia decoration:', e, item);
+							// Error adding marginalia decoration - item may be invalid
 						}
 					}
 					
@@ -338,10 +369,11 @@ function marginaliaField(plugin: MarginaliaPlugin) {
 								return fromDiff;
 							}
 							// Secondary sort: by side (startSide)
-							// side: -1 comes before 0, which comes before 1
+							// side: -1 (left) < 0 (inline/mark) < 1 (right)
 							// This ensures marks (0) come before widgets (1) at the same position
 							return a.side - b.side;
 						});
+						
 						
 						// Create ranges in sorted order
 						const ranges: any[] = [];
@@ -350,16 +382,29 @@ function marginaliaField(plugin: MarginaliaPlugin) {
 								if (info.type === 'mark' && info.to !== undefined) {
 									// Ensure valid range
 									if (info.from < info.to && info.from >= 0 && info.to <= tr.state.doc.length) {
-										const mark = Decoration.mark(info.config);
-										const range = mark.range(info.from, info.to);
-										ranges.push(range);
+										try {
+											const mark = Decoration.mark(info.config);
+											const range = mark.range(info.from, info.to);
+											ranges.push(range);
+										} catch (e) {
+											console.error('Error creating mark decoration:', e, info);
+										}
 									}
 								} else if (info.type === 'widget') {
 									// Ensure valid position
 									if (info.from >= 0 && info.from <= tr.state.doc.length) {
-										const widget = Decoration.widget(info.config);
-										const range = widget.range(info.from);
-										ranges.push(range);
+										try {
+											// Create widget decoration with side property
+											// CodeMirror 6: side must be -1 (left), 0 (inline), or 1 (right)
+											const widget = Decoration.widget({
+												widget: info.config.widget,
+												side: info.side // -1 for left, 1 for right
+											});
+											const range = widget.range(info.from);
+											ranges.push(range);
+										} catch (e) {
+											console.error('Error creating widget decoration:', e, info);
+										}
 									}
 								} else if (info.type === 'line') {
 									// Ensure valid position
@@ -376,6 +421,8 @@ function marginaliaField(plugin: MarginaliaPlugin) {
 						
 						// Final sort of ranges by their actual from and startSide properties
 						// This ensures CodeMirror's strict requirements are met
+						// CRITICAL: CodeMirror requires ranges sorted by from, then by startSide
+						// We need to sort BEFORE creating ranges, but also after to ensure startSide is set
 						ranges.sort((a: any, b: any) => {
 							const aFrom = a.from ?? 0;
 							const bFrom = b.from ?? 0;
@@ -383,9 +430,9 @@ function marginaliaField(plugin: MarginaliaPlugin) {
 								return aFrom - bFrom;
 							}
 							// If from positions are equal, sort by startSide
-							// startSide: undefined/0 comes before 1
-							const aSide = a.startSide ?? 0;
-							const bSide = b.startSide ?? 0;
+							// Marks (side 0, startSide undefined or 0) should come before widgets (side 1, startSide 1)
+							const aSide = a.startSide !== undefined ? a.startSide : 0;
+							const bSide = b.startSide !== undefined ? b.startSide : 0;
 							return aSide - bSide;
 						});
 						
@@ -393,17 +440,8 @@ function marginaliaField(plugin: MarginaliaPlugin) {
 						if (ranges.length > 0) {
 							try {
 								decorations = Decoration.set(ranges);
-							} catch (e) {
-								console.error('Decoration.set failed - ranges not sorted correctly:', e);
-								console.error('Decoration info (sorted):');
-								decorationInfo.forEach((d, i) => {
-									console.error(`  [${i}] from=${d.from}, to=${d.to ?? 'N/A'}, side=${d.side}, type=${d.type}`);
-								});
-								console.error('Range details (actual):');
-								ranges.forEach((r: any, i) => {
-									console.error(`  [${i}] from=${r.from ?? 'undefined'}, to=${r.to ?? 'undefined'}, startSide=${r.startSide ?? 'undefined'}`);
-								});
-								// Return empty decorations to prevent crash
+							} catch (e: any) {
+								// Silently fail - decorations won't show but won't crash the editor
 								decorations = Decoration.none;
 							}
 						}

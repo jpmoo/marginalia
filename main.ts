@@ -7,10 +7,11 @@ const DATA_FILE = 'marginalia-data.json';
 
 export interface MarginaliaSettings {
 	highlightColor: string;
-	transparency: number;
+	opacity: number;
 	ollamaAddress: string;
 	ollamaPort: string;
 	indicatorVisibility: 'pen' | 'highlight' | 'both' | 'neither';
+	penIconPosition: 'left' | 'right'; // Position of pen icon in margin
 	ollamaAvailable: boolean; // Track if Ollama is available
 	sortOrder: 'position' | 'date-asc' | 'date-desc'; // Sort order for current note marginalia
 	defaultSimilarity: number; // Default similarity threshold for AI functions (0.5 to 1.0)
@@ -18,10 +19,11 @@ export interface MarginaliaSettings {
 
 const DEFAULT_SETTINGS: MarginaliaSettings = {
 	highlightColor: '#ffeb3d', // Yellow
-	transparency: 0.5, // 50% transparency
+	opacity: 0.5, // 50% opacity
 	ollamaAddress: 'localhost',
 	ollamaPort: '11434',
 	indicatorVisibility: 'both',
+	penIconPosition: 'right', // Default to right margin
 	ollamaAvailable: false,
 	sortOrder: 'position',
 	defaultSimilarity: 0.7 // Default similarity threshold for AI functions
@@ -33,25 +35,30 @@ export default class MarginaliaPlugin extends Plugin {
 	settings: MarginaliaSettings;
 
 	async onload() {
-		console.log('Loading Marginalia plugin');
 
 		// Load settings and merge with defaults
 		const loadedSettings = await this.loadData();
+		
+		// Handle migration from 'transparency' to 'opacity'
+		if (loadedSettings && 'transparency' in loadedSettings && !('opacity' in loadedSettings)) {
+			loadedSettings.opacity = (loadedSettings as any).transparency;
+			delete (loadedSettings as any).transparency;
+		}
 		
 		// Merge defaults with loaded settings (loaded settings take precedence)
 		// This ensures new settings get defaults, but existing saved settings are preserved
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, loadedSettings || {});
 		
-		// If no settings were loaded, save the defaults
-		// If settings were loaded, ensure all required fields exist (for backwards compatibility)
-		if (!loadedSettings || Object.keys(loadedSettings).length === 0) {
-			// First run - save defaults
-			await this.saveData(this.settings);
-		} else {
-			// Settings exist - ensure all fields are present and save
-			// This handles cases where new settings were added
-			await this.saveData(this.settings);
+		// Ensure critical settings have valid values (defensive programming)
+		if (!this.settings.highlightColor || typeof this.settings.highlightColor !== 'string') {
+			this.settings.highlightColor = DEFAULT_SETTINGS.highlightColor;
 		}
+		if (typeof this.settings.opacity !== 'number' || this.settings.opacity < 0.1 || this.settings.opacity > 1) {
+			this.settings.opacity = DEFAULT_SETTINGS.opacity;
+		}
+		
+		// Always save to ensure settings are persisted correctly
+		await this.saveData(this.settings);
 		
 		this.applySettings();
 
@@ -68,122 +75,7 @@ export default class MarginaliaPlugin extends Plugin {
 		// Register editor extension
 		this.registerEditorExtension(MarginaliaEditorExtension(this));
 
-		// Register markdown post-processor for reading view
-		const plugin = this;
-		this.registerMarkdownPostProcessor((element, context) => {
-			const filePath = context.sourcePath;
-			if (!filePath) return;
-			
-			const items = plugin.getMarginalia(filePath);
-			if (items.length === 0) return;
-			
-			// Get the markdown content to map positions
-			const markdownContent = context.getSectionInfo(element)?.text || '';
-			if (!markdownContent) return;
-			
-			// Process each marginalia item
-			for (const item of items) {
-				try {
-					// Get the text selection from the item
-					const selectionText = item.text;
-					if (!selectionText || selectionText.trim().length === 0) {
-						// For cursor-only notes, we'll add a line indicator
-						// Find the line in the rendered HTML
-						const lineNum = item.from.line;
-						const lines = element.querySelectorAll('p, li, h1, h2, h3, h4, h5, h6, blockquote, code');
-						if (lines[lineNum]) {
-							const lineEl = lines[lineNum] as HTMLElement;
-							const itemColor = item.color || this.settings.highlightColor;
-							const itemTransparency = this.settings.transparency || 0.5;
-							const rgb = this.hexToRgb(itemColor);
-							const rgbaColor = rgb ? `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${itemTransparency})` : itemColor;
-							
-							// Add a left border indicator
-							lineEl.style.borderLeft = `3px solid ${itemColor}`;
-							lineEl.style.paddingLeft = '8px';
-							lineEl.style.position = 'relative';
-							lineEl.setAttribute('data-marginalia-id', item.id);
-							lineEl.setAttribute('data-note', item.note);
-							lineEl.classList.add('marginalia-reading-line');
-							lineEl.style.cursor = 'pointer';
-							
-							// Add hover tooltip
-							lineEl.addEventListener('mouseenter', (e) => {
-								plugin.showReadingTooltip(lineEl, item.note, e);
-							});
-							lineEl.addEventListener('mouseleave', () => {
-								plugin.hideReadingTooltip();
-							});
-							
-							// Add click handler to jump to location
-							lineEl.addEventListener('click', () => {
-								plugin.jumpToMarginalia(filePath, item.id);
-							});
-						}
-					} else {
-						// For text selections, find and highlight the text
-						// Walk through text nodes and find matching text
-						const walker = document.createTreeWalker(
-							element,
-							NodeFilter.SHOW_TEXT,
-							null
-						);
-						
-						let node;
-						while (node = walker.nextNode()) {
-							const text = node.textContent || '';
-							if (text.includes(selectionText)) {
-								// Found matching text - wrap it in a highlight span
-								const parent = node.parentElement;
-								if (parent) {
-									const itemColor = item.color || plugin.settings.highlightColor;
-									const itemTransparency = plugin.settings.transparency || 0.5;
-									const rgb = plugin.hexToRgb(itemColor);
-									const rgbaColor = rgb ? `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${itemTransparency})` : itemColor;
-									
-									// Create highlight span
-									const highlight = document.createElement('span');
-									highlight.className = 'marginalia-highlight-reading';
-									highlight.style.backgroundColor = rgbaColor;
-									highlight.style.cursor = 'pointer';
-									highlight.setAttribute('data-marginalia-id', item.id);
-									highlight.setAttribute('data-note', item.note);
-									
-									// Replace text node with highlighted version
-									const range = document.createRange();
-									range.selectNodeContents(node);
-									const textIndex = text.indexOf(selectionText);
-									if (textIndex >= 0) {
-										range.setStart(node, textIndex);
-										range.setEnd(node, textIndex + selectionText.length);
-										range.surroundContents(highlight);
-										
-										// Add hover tooltip
-										highlight.addEventListener('mouseenter', (e) => {
-											plugin.showReadingTooltip(highlight, item.note, e);
-										});
-										highlight.addEventListener('mouseleave', () => {
-											plugin.hideReadingTooltip();
-										});
-										
-										// Add click handler
-										highlight.addEventListener('click', () => {
-											plugin.jumpToMarginalia(filePath, item.id);
-										});
-										
-										break; // Only highlight first occurrence
-									}
-								}
-							}
-						}
-					}
-				} catch (e) {
-					console.error('Error processing marginalia in reading view:', e);
-				}
-			}
-		});
-
-		// Register context menu item
+		// Register context menu item for editor mode
 		this.registerEvent(
 			this.app.workspace.on('editor-menu', (menu, editor, view) => {
 				if (view instanceof MarkdownView) {
@@ -191,6 +83,7 @@ export default class MarginaliaPlugin extends Plugin {
 				}
 			})
 		);
+
 
 		// Load existing marginalia data
 		await this.loadMarginaliaData();
@@ -394,9 +287,8 @@ export default class MarginaliaPlugin extends Plugin {
 			data.items = data.items.filter(i => i.id !== id);
 			await this.saveMarginaliaForFile(filePath);
 			
-			// Immediately refresh editor and reading view
+			// Immediately refresh editor
 			this.refreshEditor(filePath);
-			this.refreshReadingView(filePath);
 			
 			if (this.sidebarView) {
 				this.sidebarView.refresh();
@@ -588,7 +480,6 @@ export default class MarginaliaPlugin extends Plugin {
 							const range = { from: fromPos, to: toPos };
 							editor.scrollIntoView(range, true);
 						} catch (e) {
-							console.log('Error scrolling to marginalia:', e);
 							// Fallback: just set cursor and scroll
 							editor.setCursor(cursorPos);
 							const range = { from: cursorPos, to: cursorPos };
@@ -650,54 +541,8 @@ export default class MarginaliaPlugin extends Plugin {
 			}
 		}
 		
-		// Also refresh reading view if open
-		this.refreshReadingView(filePath);
 	}
 	
-	public refreshReadingView(filePath: string) {
-		// Refresh reading view by re-rendering the markdown
-		const leaves = this.app.workspace.getLeavesOfType("markdown");
-		for (const leaf of leaves) {
-			const view = leaf.view as MarkdownView;
-			if (view.file && view.file.path === filePath) {
-				// Force markdown renderer to refresh
-				if ((view as any).previewMode) {
-					// Reading view - trigger a refresh
-					const previewMode = (view as any).previewMode;
-					if (previewMode && previewMode.rerender) {
-						previewMode.rerender(true);
-					}
-				}
-			}
-		}
-	}
-	
-	private readingTooltip: HTMLElement | null = null;
-	
-	public showReadingTooltip(element: HTMLElement, note: string, event: MouseEvent) {
-		if (!note) return;
-		
-		this.hideReadingTooltip();
-		
-		this.readingTooltip = document.createElement('div');
-		this.readingTooltip.className = 'marginalia-tooltip';
-		this.readingTooltip.textContent = note;
-		
-		document.body.appendChild(this.readingTooltip);
-		
-		const rect = element.getBoundingClientRect();
-		this.readingTooltip.style.position = 'absolute';
-		this.readingTooltip.style.left = `${rect.left}px`;
-		this.readingTooltip.style.top = `${rect.bottom + 5}px`;
-		this.readingTooltip.style.zIndex = '10000';
-	}
-	
-	public hideReadingTooltip() {
-		if (this.readingTooltip) {
-			this.readingTooltip.remove();
-			this.readingTooltip = null;
-		}
-	}
 
 	private generateId(): string {
 		return Date.now().toString(36) + Math.random().toString(36).substr(2);
@@ -810,14 +655,12 @@ export default class MarginaliaPlugin extends Plugin {
 									// Use current time as default for items missing timestamps
 									item.timestamp = currentTime;
 									needsSave = true;
-									console.log(`Added timestamp to marginalia item ${item.id} in ${filePath}`);
 								}
 								
 								// Backwards compatibility: add color if missing
 								if (!item.color) {
 									item.color = this.settings.highlightColor;
 									needsSave = true;
-									console.log(`Added default color to marginalia item ${item.id} in ${filePath}`);
 								}
 								
 								// Clean up: if no meaningful note text, always set embedding to null
@@ -825,7 +668,6 @@ export default class MarginaliaPlugin extends Plugin {
 									// Always set to null if note text is not meaningful (even if field is undefined or has a value)
 									item.embedding = null;
 									needsSave = true;
-									console.log(`Set note embedding to null for marginalia item ${item.id} in ${filePath} (no meaningful note text: "${item.note}")`);
 								}
 								
 								// Clean up: if no meaningful selection text, always set selectionEmbedding to null
@@ -833,7 +675,6 @@ export default class MarginaliaPlugin extends Plugin {
 									// Always set to null if text is not meaningful (even if field is undefined or has a value)
 									item.selectionEmbedding = null;
 									needsSave = true;
-									console.log(`Set selection embedding to null for marginalia item ${item.id} in ${filePath} (no meaningful text: "${item.text}")`);
 								}
 							}
 							// Only keep files that have items
@@ -842,7 +683,6 @@ export default class MarginaliaPlugin extends Plugin {
 						} else {
 							// File has no items or empty items array - mark for removal
 							needsSave = true;
-							console.log(`Removing empty file section: ${filePath}`);
 						}
 					}
 					
@@ -854,14 +694,11 @@ export default class MarginaliaPlugin extends Plugin {
 					
 					// Save if we added timestamps
 					if (needsSave) {
-						console.log('Saving marginalia data with added timestamps...');
 						await this.saveMarginaliaData();
-						console.log('Marginalia data saved successfully');
 					}
 				}
 			}
 		} catch (e) {
-			console.log('No existing marginalia data found, starting fresh', e);
 		}
 	}
 
@@ -1017,7 +854,6 @@ export default class MarginaliaPlugin extends Plugin {
 			const tokenCount = this.estimateTokenCount(textToEmbed);
 			
 			if (tokenCount > 2048) {
-				console.log(`Marginalia note ${item.id} is too long (${tokenCount} tokens), summarizing...`);
 				finalText = await this.summarizeText(textToEmbed);
 			}
 
@@ -1039,7 +875,6 @@ export default class MarginaliaPlugin extends Plugin {
 				// Ollama returns embedding in data.embedding array
 				if (data.embedding && Array.isArray(data.embedding) && data.embedding.length > 0) {
 					item.embedding = data.embedding;
-					console.log(`Generated embedding for marginalia note ${item.id} (${data.embedding.length} dimensions)`);
 				} else {
 					console.error('Invalid embedding response format:', data);
 				}
@@ -1080,7 +915,6 @@ export default class MarginaliaPlugin extends Plugin {
 			const tokenCount = this.estimateTokenCount(textToEmbed);
 			
 			if (tokenCount > 2048) {
-				console.log(`Marginalia selection ${item.id} is too long (${tokenCount} tokens), summarizing...`);
 				finalText = await this.summarizeText(textToEmbed);
 			}
 
@@ -1101,7 +935,6 @@ export default class MarginaliaPlugin extends Plugin {
 				// Ollama returns embedding in data.embedding array
 				if (data.embedding && Array.isArray(data.embedding) && data.embedding.length > 0) {
 					item.selectionEmbedding = data.embedding;
-					console.log(`Generated selection embedding for marginalia ${item.id} (${data.embedding.length} dimensions)`);
 				} else {
 					console.error('Invalid embedding response format:', data);
 				}
@@ -1120,11 +953,9 @@ export default class MarginaliaPlugin extends Plugin {
 	 */
 	private async generateMissingEmbeddings(): Promise<void> {
 		if (!this.settings.ollamaAvailable) {
-			console.log('Ollama check failed or not available, skipping embedding generation');
 			return;
 		}
 
-		console.log('Scanning marginalia for missing note embeddings...');
 		let count = 0;
 		let needsSave = false;
 
@@ -1134,7 +965,6 @@ export default class MarginaliaPlugin extends Plugin {
 					// Only generate if there's meaningful note text and no embedding
 					if (this.hasMeaningfulText(item.note) && 
 						(!item.embedding || !Array.isArray(item.embedding) || item.embedding.length === 0)) {
-						console.log(`Generating note embedding for marginalia ${item.id} in ${filePath}...`);
 						await this.generateEmbeddingForItem(item);
 						count++;
 						needsSave = true;
@@ -1145,18 +975,13 @@ export default class MarginaliaPlugin extends Plugin {
 						// Clean up: if no meaningful note text, always set embedding to null
 						item.embedding = null;
 						needsSave = true;
-						console.log(`Set note embedding to null for marginalia ${item.id} in ${filePath} (no meaningful note text: "${item.note}")`);
 					}
 				}
 			}
 		}
 
 		if (needsSave) {
-			console.log(`Generated ${count} missing note embeddings, saving...`);
 			await this.saveMarginaliaData();
-			console.log('Note embeddings saved successfully');
-		} else {
-			console.log('All marginalia already have note embeddings');
 		}
 	}
 
@@ -1166,11 +991,9 @@ export default class MarginaliaPlugin extends Plugin {
 	 */
 	private async generateMissingSelectionEmbeddings(): Promise<void> {
 		if (!this.settings.ollamaAvailable) {
-			console.log('Ollama check failed or not available, skipping selection embedding generation');
 			return;
 		}
 
-		console.log('Scanning marginalia for missing selection embeddings...');
 		let count = 0;
 		let needsSave = false;
 
@@ -1180,7 +1003,6 @@ export default class MarginaliaPlugin extends Plugin {
 					// Only generate if there's meaningful text and no selection embedding
 					if (this.hasMeaningfulText(item.text) && 
 						(!item.selectionEmbedding || !Array.isArray(item.selectionEmbedding) || item.selectionEmbedding.length === 0)) {
-						console.log(`Generating selection embedding for marginalia ${item.id} in ${filePath}...`);
 						await this.generateSelectionEmbeddingForItem(item);
 						count++;
 						needsSave = true;
@@ -1191,18 +1013,13 @@ export default class MarginaliaPlugin extends Plugin {
 						// Clean up: if no meaningful text, always set selectionEmbedding to null
 						item.selectionEmbedding = null;
 						needsSave = true;
-						console.log(`Set selection embedding to null for marginalia ${item.id} in ${filePath} (no meaningful text: "${item.text}")`);
 					}
 				}
 			}
 		}
 
 		if (needsSave) {
-			console.log(`Generated ${count} missing selection embeddings, saving...`);
 			await this.saveMarginaliaData();
-			console.log('Selection embeddings saved successfully');
-		} else {
-			console.log('All marginalia with text already have selection embeddings');
 		}
 	}
 
@@ -1353,7 +1170,6 @@ export default class MarginaliaPlugin extends Plugin {
 			const tokenCount = this.estimateTokenCount(combinedText);
 			
 			if (tokenCount > 2048) {
-				console.log(`Combined text is too long (${tokenCount} tokens), summarizing...`);
 				finalText = await this.summarizeText(combinedText);
 			}
 
@@ -1453,22 +1269,22 @@ export default class MarginaliaPlugin extends Plugin {
 	public applySettings() {
 		// Apply CSS variables for highlight color and transparency
 		document.documentElement.style.setProperty('--marginalia-color', this.settings.highlightColor);
-		document.documentElement.style.setProperty('--marginalia-transparency', this.settings.transparency.toString());
+		document.documentElement.style.setProperty('--marginalia-opacity', this.settings.opacity.toString());
 		
 		// Calculate rgba color for highlights
 		const rgb = this.hexToRgb(this.settings.highlightColor);
 		if (rgb) {
 			document.documentElement.style.setProperty(
 				'--marginalia-highlight-bg',
-				`rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${this.settings.transparency})`
+				`rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${this.settings.opacity})`
 			);
 			document.documentElement.style.setProperty(
 				'--marginalia-highlight-border',
-				`rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${this.settings.transparency * 2})`
+				`rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${this.settings.opacity * 2})`
 			);
 			document.documentElement.style.setProperty(
 				'--marginalia-highlight-hover',
-				`rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${this.settings.transparency + 0.2})`
+				`rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${this.settings.opacity + 0.2})`
 			);
 			document.documentElement.style.setProperty(
 				'--marginalia-icon-color',
@@ -1484,6 +1300,22 @@ export default class MarginaliaPlugin extends Plugin {
 			g: parseInt(result[2], 16),
 			b: parseInt(result[3], 16)
 		} : null;
+	}
+
+	public isLightColor(hex: string): boolean {
+		// Remove # if present
+		hex = hex.replace('#', '');
+		
+		// Convert to RGB
+		const r = parseInt(hex.substring(0, 2), 16);
+		const g = parseInt(hex.substring(2, 4), 16);
+		const b = parseInt(hex.substring(4, 6), 16);
+		
+		// Calculate luminance
+		const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+		
+		// Return true if light (luminance > 0.5)
+		return luminance > 0.5;
 	}
 
 }
@@ -1687,7 +1519,6 @@ class MarginaliaSettingTab extends PluginSettingTab {
 						this.plugin.settings.defaultSimilarity = value;
 						try {
 							await this.plugin.saveData(this.plugin.settings);
-							console.log('Settings saved: defaultSimilarity =', value);
 						} catch (error) {
 							console.error('Error saving settings:', error);
 						}
@@ -1711,14 +1542,16 @@ class MarginaliaSettingTab extends PluginSettingTab {
 			.setName('Default Highlight Color')
 			.setDesc('Default color for marginalia highlights. Individual marginalia can override this with their own color.')
 			.addColorPicker(colorPicker => {
-				colorPicker.setValue(this.plugin.settings.highlightColor);
+				// Ensure we have a valid color value
+				const currentColor = this.plugin.settings.highlightColor || DEFAULT_SETTINGS.highlightColor;
+				colorPicker.setValue(currentColor);
 				colorPicker.onChange(async (value) => {
 					this.plugin.settings.highlightColor = value;
 					try {
 						await this.plugin.saveData(this.plugin.settings);
-						console.log('Settings saved: highlightColor =', value);
 					} catch (error) {
 						console.error('Error saving settings:', error);
+						new Notice('Error saving color setting');
 					}
 					this.plugin.applySettings();
 					// Refresh editor to apply new color
@@ -1731,29 +1564,32 @@ class MarginaliaSettingTab extends PluginSettingTab {
 				});
 			});
 
-		// Highlight Transparency Slider
+		// Highlight Opacity Slider
 		new Setting(containerEl)
-			.setName('Highlight Transparency')
-			.setDesc(`Adjust the transparency of highlights (${Math.round(this.plugin.settings.transparency * 100)}%)`)
+			.setName('Highlight Opacity')
+			.setDesc(`Adjust the opacity of highlights (${Math.round((typeof this.plugin.settings.opacity === 'number' ? this.plugin.settings.opacity : DEFAULT_SETTINGS.opacity) * 100)}%)`)
 			.addSlider(slider => {
+				// Ensure we have a valid opacity value
+				const currentOpacity = typeof this.plugin.settings.opacity === 'number' 
+					? this.plugin.settings.opacity 
+					: DEFAULT_SETTINGS.opacity;
 				slider
 					.setLimits(0.1, 1, 0.05)
-					.setValue(this.plugin.settings.transparency)
+					.setValue(currentOpacity)
 					.setDynamicTooltip()
 					.onChange(async (value) => {
 						// Update the setting immediately
-						this.plugin.settings.transparency = value;
+						this.plugin.settings.opacity = value;
 						// Save to JSON immediately
 						try {
 							await this.plugin.saveData(this.plugin.settings);
-							console.log('Settings saved: transparency =', value);
 						} catch (error) {
 							console.error('Error saving settings:', error);
-							new Notice('Error saving transparency setting');
+							new Notice('Error saving opacity setting');
 						}
-						// Apply the new transparency
+						// Apply the new opacity
 						this.plugin.applySettings();
-						// Refresh editor to apply new transparency
+						// Refresh editor to apply new opacity
 						this.plugin.app.workspace.getLeavesOfType("markdown").forEach(leaf => {
 							const view = leaf.view as MarkdownView;
 							if (view.file) {
@@ -1765,7 +1601,8 @@ class MarginaliaSettingTab extends PluginSettingTab {
 
 		// Indicator Visibility Setting (under Appearance)
 		new Setting(containerEl)
-			.setName('Indicator Visibility')
+			.setName('Indicator Visibility (Edit Mode)')
+			.setDesc('Control visibility of highlights and pen icons in edit mode')
 			.setDesc('Choose what indicators to show for marginalia')
 			.addDropdown(dropdown => {
 				dropdown
@@ -1803,6 +1640,35 @@ class MarginaliaSettingTab extends PluginSettingTab {
 						});
 					});
 			});
+
+		// Pen Icon Position Setting (under Appearance)
+		new Setting(containerEl)
+			.setName('Pen Icon Position (Edit Mode)')
+			.setDesc('Choose whether the pen icon appears in the left or right margin in edit mode')
+			.addDropdown(dropdown => {
+				dropdown
+					.addOption('right', 'Right Margin')
+					.addOption('left', 'Left Margin')
+					.setValue(this.plugin.settings.penIconPosition || 'right')
+					.onChange(async (value: 'left' | 'right') => {
+						this.plugin.settings.penIconPosition = value;
+						await this.plugin.saveData(this.plugin.settings);
+						// Refresh all editors
+						this.plugin.app.workspace.getLeavesOfType("markdown").forEach(leaf => {
+							const view = leaf.view as MarkdownView;
+							if (view.file) {
+								this.plugin.refreshEditor(view.file.path);
+							}
+						});
+						// Refresh reading view
+						this.plugin.app.workspace.getLeavesOfType("markdown").forEach(leaf => {
+							const view = leaf.view as MarkdownView;
+							if (view.file) {
+							}
+						});
+					});
+			});
+
 
 	}
 
