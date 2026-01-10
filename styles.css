@@ -1,0 +1,326 @@
+/* Marginalia Highlight Styles */
+.marginalia-highlight {
+	background-color: var(--marginalia-highlight-bg, rgba(255, 235, 59, 0.3));
+	cursor: pointer;
+	transition: background-color 0.2s;
+}
+
+.marginalia-highlight:hover {
+	background-color: var(--marginalia-highlight-hover, rgba(255, 235, 59, 0.5));
+}
+
+/* Marginalia Icon Widget */
+.marginalia-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 20px;
+	height: 20px;
+	border-radius: 50%;
+	font-size: 0.85em;
+	cursor: pointer;
+	vertical-align: baseline;
+	line-height: 1;
+	opacity: 0.9;
+	transition: all 0.2s;
+	position: absolute;
+	right: 0;
+	margin-right: 10px;
+	box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+	font-weight: bold;
+}
+
+.marginalia-icon:hover {
+	opacity: 1;
+	transform: scale(1.1);
+	box-shadow: 0 2px 5px rgba(0, 0, 0, 0.3);
+}
+
+/* Cursor position highlight (subtle) */
+.marginalia-highlight-cursor {
+	background-color: var(--marginalia-highlight-bg, rgba(255, 235, 59, 0.3));
+	border-left: 2px solid var(--marginalia-highlight-border, rgba(255, 235, 59, 0.6));
+	cursor: pointer;
+	transition: background-color 0.2s;
+	min-width: 1ch; /* Ensure at least one character width */
+}
+
+/* Line indicator for cursor positions when highlight is off */
+.marginalia-line-indicator {
+	border-left: 2px solid var(--marginalia-highlight-border, rgba(255, 235, 59, 0.6));
+	padding-left: 2px;
+}
+
+/* Tooltip Styles */
+.marginalia-tooltip {
+	background-color: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 4px;
+	padding: 8px 12px;
+	max-width: 300px;
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+	font-size: 0.9em;
+	line-height: 1.4;
+	z-index: 10000;
+	pointer-events: none;
+	word-wrap: break-word;
+}
+
+/* Sidebar Styles */
+.marginalia-sidebar {
+	padding: 10px;
+}
+
+.marginalia-header {
+	margin-bottom: 15px;
+	padding-bottom: 10px;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.marginalia-header h2 {
+	margin: 0;
+	font-size: 1.2em;
+}
+
+.marginalia-content {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+
+.marginalia-empty {
+	padding: 20px;
+	text-align: center;
+	color: var(--text-muted);
+	font-style: italic;
+}
+
+.marginalia-item {
+	padding: 10px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 4px;
+	background-color: var(--background-secondary);
+	transition: background-color 0.2s;
+}
+
+.marginalia-item:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.marginalia-preview {
+	margin-bottom: 8px;
+}
+
+.marginalia-text-preview {
+	font-size: 0.85em;
+	color: var(--text-muted);
+	margin-bottom: 4px;
+	font-style: italic;
+}
+
+.marginalia-note-preview {
+	font-size: 0.9em;
+	color: var(--text-normal);
+	line-height: 1.4;
+}
+
+.marginalia-actions {
+	display: flex;
+	gap: 5px;
+	margin-top: 8px;
+	flex-wrap: wrap;
+}
+
+.marginalia-actions button {
+	font-size: 0.85em;
+	padding: 4px 6px;
+	min-height: auto;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 3px;
+	background: var(--background-primary);
+	color: var(--text-normal);
+	cursor: pointer;
+	transition: all 0.2s;
+}
+
+.marginalia-actions button:hover {
+	background: var(--background-modifier-hover);
+	border-color: var(--background-modifier-border-hover);
+}
+
+
+.marginalia-actions button svg {
+	display: block;
+}
+
+/* Tab Styles */
+.marginalia-tabs {
+	display: flex;
+	gap: 5px;
+	margin-bottom: 10px;
+	border-bottom: 1px solid var(--background-modifier-border);
+	padding-bottom: 5px;
+}
+
+.marginalia-tab {
+	background: transparent;
+	border: none;
+	padding: 6px 12px;
+	cursor: pointer;
+	color: var(--text-muted);
+	border-bottom: 2px solid transparent;
+	transition: all 0.2s;
+	font-size: 0.9em;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+
+.marginalia-tab:hover {
+	color: var(--text-normal);
+	background-color: var(--background-modifier-hover);
+}
+
+.marginalia-tab-active {
+	color: var(--text-normal);
+	border-bottom-color: var(--text-accent);
+	font-weight: 500;
+}
+
+.marginalia-tab-icon {
+	display: flex;
+	align-items: center;
+	width: 16px;
+	height: 16px;
+	flex-shrink: 0;
+}
+
+.marginalia-tab-icon svg {
+	width: 100%;
+	height: 100%;
+}
+
+.marginalia-tab-text {
+	flex: 1;
+}
+
+.marginalia-content-area {
+	/* Content area for tabs */
+}
+
+.marginalia-file-name {
+	font-weight: bold;
+	margin-bottom: 4px;
+}
+
+.marginalia-file-path {
+	font-size: 0.85em;
+	color: var(--text-muted);
+	margin-bottom: 4px;
+}
+
+.marginalia-file-count {
+	font-size: 0.85em;
+	color: var(--text-muted);
+}
+
+/* Tree View Styles */
+.marginalia-tree-controls {
+	margin-bottom: 10px;
+	display: flex;
+	justify-content: flex-end;
+	gap: 5px;
+}
+
+.marginalia-tree {
+	display: flex;
+	flex-direction: column;
+}
+
+.marginalia-tree-item {
+	padding: 2px 0;
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	cursor: pointer;
+	border-radius: 3px;
+	transition: background-color 0.2s;
+}
+
+.marginalia-tree-item:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.marginalia-tree-toggle {
+	display: flex;
+	align-items: center;
+	width: 12px;
+	flex-shrink: 0;
+	color: var(--text-muted);
+}
+
+.marginalia-tree-folder {
+	font-weight: 500;
+	flex: 1;
+}
+
+.marginalia-tree-file-icon {
+	display: flex;
+	align-items: center;
+	width: 12px;
+	flex-shrink: 0;
+	opacity: 0.6;
+	color: var(--text-muted);
+}
+
+.marginalia-tree-file {
+	flex: 1;
+}
+
+.marginalia-tree-count {
+	font-size: 0.85em;
+	color: var(--text-muted);
+}
+
+/* AI Functions Modal Styles */
+.marginalia-ai-modal {
+	overflow: visible !important;
+}
+
+.marginalia-ai-modal .modal {
+	min-height: 500px !important;
+	max-height: 80vh !important;
+	overflow: visible !important;
+}
+
+.marginalia-ai-modal .modal-content {
+	min-width: 450px !important;
+	min-height: 500px !important;
+	max-height: 80vh !important;
+	overflow: visible !important;
+}
+
+.marginalia-ai-modal select {
+	min-width: 400px !important;
+	width: 100% !important;
+	max-height: none !important;
+	height: auto !important;
+	overflow: visible !important;
+	padding: 8px !important;
+	font-size: 14px !important;
+}
+
+.marginalia-ai-modal select option {
+	padding: 8px !important;
+	height: auto !important;
+	line-height: 1.5 !important;
+}
+
+/* Spinner animation for progress indicators */
+@keyframes spin {
+	0% { transform: rotate(0deg); }
+	100% { transform: rotate(360deg); }
+}
