@@ -1,7 +1,7 @@
 {
 	"name": "marginalia",
 	"version": "Beta01",
-	"description": "Add margin notes to your Obsidian notes",
+	"description": "Add margin notes to your Obsidian notes with AI-powered features via Ollama",
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
