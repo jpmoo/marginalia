@@ -74,6 +74,11 @@ export class MarginaliaView extends ItemView {
 			(this as any).currentTab = 'current';
 			currentNoteTab.addClass('marginalia-tab-active');
 			allNotesTab.removeClass('marginalia-tab-active');
+			// Sync search term from all notes to current note when switching
+			// Always sync to maintain search persistence across tabs
+			if (this.searchTerm) {
+				this.currentNoteSearchTerm = this.searchTerm;
+			}
 			this.refresh();
 		};
 
@@ -81,6 +86,11 @@ export class MarginaliaView extends ItemView {
 			(this as any).currentTab = 'all';
 			allNotesTab.addClass('marginalia-tab-active');
 			currentNoteTab.removeClass('marginalia-tab-active');
+			// Sync search term from current note to all notes when switching
+			// Always sync to maintain search persistence across tabs
+			if (this.currentNoteSearchTerm) {
+				this.searchTerm = this.currentNoteSearchTerm;
+			}
 			this.refresh();
 		};
 
@@ -415,7 +425,7 @@ export class MarginaliaView extends ItemView {
 		topControlsContainer.style.marginBottom = '10px';
 		topControlsContainer.style.display = 'flex';
 		topControlsContainer.style.gap = '10px';
-		topControlsContainer.style.alignItems = 'center'; // Align items on the same horizontal line
+		topControlsContainer.style.alignItems = 'stretch'; // Stretch to same height
 		
 		// Search input container (flexible)
 		const searchContainer = topControlsContainer.createDiv();
@@ -423,6 +433,7 @@ export class MarginaliaView extends ItemView {
 		searchContainer.style.position = 'relative';
 		searchContainer.style.display = 'flex';
 		searchContainer.style.alignItems = 'center';
+		searchContainer.style.minHeight = '32px'; // Match button height
 		
 		const searchInput = searchContainer.createEl('input', {
 			attr: {
@@ -469,6 +480,7 @@ export class MarginaliaView extends ItemView {
 		controlsDiv.style.gap = '5px';
 		controlsDiv.style.flexShrink = '0';
 		controlsDiv.style.alignItems = 'center';
+		controlsDiv.style.alignSelf = 'center'; // Center align within flex container
 		
 		// Store reference to tree container for filtering
 		const treeContainer = contentArea.createDiv('marginalia-tree');
@@ -557,20 +569,28 @@ export class MarginaliaView extends ItemView {
 		const expandAllBtn = controlsDiv.createEl('button');
 		expandAllBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="7" y1="3" x2="7" y2="11"/><line x1="3" y1="7" x2="11" y2="7"/></svg>';
 		expandAllBtn.title = 'Expand all';
-		expandAllBtn.style.padding = '4px 6px';
+		expandAllBtn.style.padding = '6px 8px';
 		expandAllBtn.style.border = '1px solid var(--background-modifier-border)';
-		expandAllBtn.style.borderRadius = '3px';
+		expandAllBtn.style.borderRadius = '4px';
 		expandAllBtn.style.background = 'var(--background-primary)';
 		expandAllBtn.style.cursor = 'pointer';
+		expandAllBtn.style.height = '32px'; // Match search input height
+		expandAllBtn.style.display = 'flex';
+		expandAllBtn.style.alignItems = 'center';
+		expandAllBtn.style.justifyContent = 'center';
 		
 		const collapseAllBtn = controlsDiv.createEl('button');
 		collapseAllBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="7" x2="11" y2="7"/></svg>';
 		collapseAllBtn.title = 'Collapse all';
-		collapseAllBtn.style.padding = '4px 6px';
+		collapseAllBtn.style.padding = '6px 8px';
 		collapseAllBtn.style.border = '1px solid var(--background-modifier-border)';
-		collapseAllBtn.style.borderRadius = '3px';
+		collapseAllBtn.style.borderRadius = '4px';
 		collapseAllBtn.style.background = 'var(--background-primary)';
 		collapseAllBtn.style.cursor = 'pointer';
+		collapseAllBtn.style.height = '32px'; // Match search input height
+		collapseAllBtn.style.display = 'flex';
+		collapseAllBtn.style.alignItems = 'center';
+		collapseAllBtn.style.justifyContent = 'center';
 		
 		// Expand all handler
 		expandAllBtn.onclick = () => {

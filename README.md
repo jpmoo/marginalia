@@ -43,11 +43,11 @@ A powerful Obsidian plugin that allows you to add margin notes (marginalia) to y
 The plugin includes powerful AI features for finding related marginalia and creating visualizations:
 
 - **Find Similar Marginalia**: Compare marginalia note text using embeddings
-- **Find Similar Selection**: Compare selected text across all marginalia
-- **Find Similar Selection + Marginalia**: Combined comparison of both selection and note text
-- **Create Table of Contents**: Generate a formatted note linking to related marginalia
-- **Create Canvas**: Generate a visual canvas with nodes for related notes
-- **AI-generated filenames**: Automatically generate descriptive filenames for TOC and Canvas files
+- **Find Similar Selection**: Compare selected text across all marginalia using embeddings
+- **Find Similar Selection + Marginalia**: Combined comparison of both selection and note text using embeddings
+- **Create Table of Contents (TOC)**: Generate a formatted note linking to related marginalia/selections
+- **Create Canvas**: Generate a visual canvas with nodes for notes with related marginalia/selections
+- **AI-generated filenames**: Automatically generates descriptive filenames for TOC and Canvas files
 
 All AI features use configurable similarity thresholds and include progress indicators.
 
@@ -55,7 +55,7 @@ All AI features use configurable similarity thresholds and include progress indi
 
 ### Basic Requirements
 
-- **Obsidian**: Version 0.15.0 or higher
+- **Obsidian**: Developed on version 1.11.4+
 - **Node.js**: For building the plugin (development only)
 
 ### AI Features Requirements
@@ -139,10 +139,9 @@ Access settings via: Settings → Marginalia
 
 ## Data Storage
 
-Marginalia data is stored in `.obsidian/plugins/marginalia/data.json` and includes:
+Marginalia data including settings is stored in `.obsidian/plugins/marginalia/data.json` and includes:
 - All marginalia items with their text, positions, timestamps, and colors
 - Embeddings for AI features (when available)
-- Settings are stored in Obsidian's plugin data
 
 ## AI Features Details
 
@@ -172,7 +171,7 @@ Both export features use AI to generate descriptive filenames based on the conte
 
 ## Technical Details
 
-- Built with TypeScript
+- Built with TypeScript via Cursor vibe-coder
 - Uses CodeMirror 6 for editor integration
 - Uses Obsidian's Plugin API
 - Canvas files use Obsidian's native canvas format
