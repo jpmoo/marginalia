@@ -916,6 +916,7 @@ export class AIFunctionsModal extends Modal {
 	private filePath: string;
 	private functionContent: HTMLElement;
 	private currentSimilarItems: Array<{ item: MarginaliaItem; filePath: string; similarity: number }> = [];
+	private currentFunctionType: string = '';
 
 	constructor(app: any, plugin: MarginaliaPlugin, item: MarginaliaItem, filePath: string) {
 		super(app);
@@ -1000,6 +1001,7 @@ export class AIFunctionsModal extends Modal {
 
 	private showFunctionUI(functionType: string) {
 		this.functionContent.empty();
+		this.currentFunctionType = functionType;
 		
 		if (functionType === 'similar') {
 			this.showFindSimilarUI('note');
@@ -1014,6 +1016,18 @@ export class AIFunctionsModal extends Modal {
 		} else if (functionType === 'notes-similar-combined') {
 			this.showFindNotesSimilarUI('combined');
 		}
+	}
+
+	private getFunctionDisplayName(functionType: string): string {
+		const functionNames: { [key: string]: string } = {
+			'similar': 'Find Notes with Similar Marginalia',
+			'similar-selection': 'Find Notes with Similar Selection',
+			'similar-combined': 'Find Notes with Similar Selection + Marginalia',
+			'notes-similar': 'Find Notes Similar to Marginalia',
+			'notes-similar-selection': 'Find Notes Similar to Selection',
+			'notes-similar-combined': 'Find Notes Similar to Selection + Marginalia'
+		};
+		return functionNames[functionType] || 'Unknown Function';
 	}
 
 	private showFindSimilarUI(mode: 'note' | 'selection' | 'combined') {
@@ -1782,6 +1796,12 @@ ${allText}`;
 			// Build table of contents content
 			let content = `# Table of Contents - Similar ${isNoteBasedSearch ? 'Notes' : 'Marginalia'}\n\n`;
 			content += `Generated: ${new Date().toLocaleString()}\n\n`;
+			
+			// Add note about which function was used
+			if (this.currentFunctionType) {
+				const functionName = this.getFunctionDisplayName(this.currentFunctionType);
+				content += `**Function Used:** ${functionName}\n\n`;
+			}
 			
 			// Always include current note with selection and marginalia at the top
 			const originalFile = this.app.vault.getAbstractFileByPath(this.filePath);

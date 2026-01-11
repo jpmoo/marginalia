@@ -882,8 +882,11 @@ export default class MarginaliaPlugin extends Plugin {
 			return;
 		}
 
-		// Process files immediately
-		this.processFoldersForEmbedding();
+		// Process files after a short delay to ensure vault is fully loaded
+		// The listener will catch any files that are created/modified after this
+		setTimeout(() => {
+			this.processFoldersForEmbedding();
+		}, 2000);
 
 		// Register file system events to watch for changes (only once)
 		this.registerEvent(
@@ -939,92 +942,82 @@ export default class MarginaliaPlugin extends Plugin {
 	 */
 	private async processFolderForEmbedding(folderPath: string): Promise<void> {
 		try {
-			// Try multiple methods to find the folder
+			// Always use file-based approach (same as listener) - more reliable than folder objects
+			// Use the same matching logic as isFileInSimilarityFolders
 			const normalizedPath = this.normalizePath(folderPath);
-			let folder = this.app.vault.getAbstractFileByPath(folderPath);
 			
-			// If not found with original path, try normalized
-			if (!folder && normalizedPath !== folderPath) {
-				folder = this.app.vault.getAbstractFileByPath(normalizedPath);
+			// Wait for vault to be ready (retry if no files found initially)
+			let allFiles = this.app.vault.getMarkdownFiles();
+			if (allFiles.length === 0) {
+				// Vault might not be ready yet, wait a bit and retry
+				console.log(`No files found in vault yet, waiting for vault to be ready...`);
+				await new Promise(resolve => setTimeout(resolve, 1000));
+				allFiles = this.app.vault.getMarkdownFiles();
+				console.log(`After wait, found ${allFiles.length} total markdown file(s) in vault`);
+			} else {
+				console.log(`Found ${allFiles.length} total markdown file(s) in vault`);
 			}
 			
-			// If still not found, try using getAllFolders() to find it
-			if (!folder) {
-				const allFolders = this.app.vault.getAllFolders();
-				// Try exact match first
-				const foundFolder = allFolders.find(f => f.path === folderPath || f.path === normalizedPath);
-				if (foundFolder) {
-					folder = foundFolder;
-				} else {
-					// If still not found, try case-insensitive match
-					const foundFolderCaseInsensitive = allFolders.find(f => 
-						f.path.toLowerCase() === folderPath.toLowerCase() || 
-						f.path.toLowerCase() === normalizedPath.toLowerCase()
-					);
-					if (foundFolderCaseInsensitive) {
-						folder = foundFolderCaseInsensitive;
+			const mdFiles = allFiles.filter(file => {
+				return file.path === folderPath || file.path.startsWith(folderPath + '/');
+			});
+			
+			if (mdFiles.length > 0) {
+				console.log(`Found ${mdFiles.length} markdown file(s) matching folder path: "${folderPath}"`);
+				console.log(`Sample matching files:`, mdFiles.slice(0, 5).map(f => f.path));
+				for (const file of mdFiles) {
+					if (!this.settings.embeddingOn) {
+						return;
 					}
+					await this.processFileForEmbedding(file);
 				}
-			}
-			
-			// If folder still not found, try to get files by path prefix instead
-			if (!folder) {
-				console.log(`Folder object not found: "${folderPath}", trying to find files by path prefix...`);
-				const allFiles = this.app.vault.getMarkdownFiles();
-				const normalizedSearchPath = normalizedPath.toLowerCase();
-				const mdFiles = allFiles.filter(file => {
-					const filePath = this.normalizePath(file.path).toLowerCase();
-					return filePath === normalizedSearchPath || filePath.startsWith(normalizedSearchPath + '/');
-				});
-				
-				if (mdFiles.length > 0) {
-					console.log(`Found ${mdFiles.length} markdown file(s) matching folder path: ${folderPath}`);
-					for (const file of mdFiles) {
-						if (!this.settings.embeddingOn) {
-							return;
-						}
-						await this.processFileForEmbedding(file);
-					}
-					console.log(`Completed processing files for folder path: ${folderPath}`);
-					return;
-				} else {
-					console.error(`Folder not found: "${folderPath}" (also tried: "${normalizedPath}")`);
-					console.error(`No files found matching this path prefix.`);
-					// List some available folders for debugging
-					const allFolders = this.app.vault.getAllFolders();
-					if (allFolders.length > 0) {
-						console.error(`Available folders in vault (first 20):`, 
-							allFolders.slice(0, 20).map(f => f.path));
-					}
-					return;
-				}
-			}
-			
-			const actualPath = folder.path;
-			console.log(`Found folder: "${actualPath}" (searched for: "${folderPath}")`);
-
-			// Get all .md files in the folder (recursively)
-			const mdFiles: TFile[] = [];
-			this.collectMarkdownFiles(folder, mdFiles);
-
-			if (mdFiles.length === 0) {
-				console.log(`No markdown files found in folder: ${actualPath}`);
+				console.log(`Completed processing files for folder path: ${folderPath}`);
 				return;
 			}
-
-			console.log(`Found ${mdFiles.length} markdown file(s) in folder: ${actualPath}`);
-			console.log(`Processing files in folder: ${actualPath}`);
-
-			for (const file of mdFiles) {
-				// Check if embedding was paused before processing each file
-				if (!this.settings.embeddingOn) {
-					console.log(`Embedding paused, stopping folder processing: ${actualPath}`);
-					return; // Stop processing if embedding was paused
+			
+			// Try with normalized path as fallback
+			const mdFilesNormalized = allFiles.filter(file => {
+				const normalizedFilePath = this.normalizePath(file.path);
+				return normalizedFilePath === normalizedPath || normalizedFilePath.startsWith(normalizedPath + '/');
+			});
+			
+			if (mdFilesNormalized.length > 0) {
+				console.log(`Found ${mdFilesNormalized.length} markdown file(s) matching normalized folder path: "${normalizedPath}"`);
+				console.log(`Sample matching files:`, mdFilesNormalized.slice(0, 5).map(f => f.path));
+				for (const file of mdFilesNormalized) {
+					if (!this.settings.embeddingOn) {
+						return;
+					}
+					await this.processFileForEmbedding(file);
 				}
-				await this.processFileForEmbedding(file);
+				console.log(`Completed processing files for normalized folder path: ${normalizedPath}`);
+				return;
 			}
 			
-			console.log(`Completed processing folder: ${actualPath}`);
+			// If still no files found, log debugging information
+			console.error(`No files found matching folder path: "${folderPath}" (also tried: "${normalizedPath}")`);
+			console.error(`Searched ${allFiles.length} total markdown file(s) in vault`);
+			// List some available folders and sample file paths for debugging
+			const allFolders = this.app.vault.getAllFolders();
+			if (allFolders.length > 0) {
+				console.error(`Available folders in vault (first 20):`, 
+					allFolders.slice(0, 20).map(f => f.path));
+			}
+			// Show some sample file paths that might match
+			const sampleFiles = allFiles.slice(0, 10);
+			if (sampleFiles.length > 0) {
+				console.error(`Sample file paths in vault:`, sampleFiles.map(f => f.path));
+				// Show files that start with similar names
+				const similarFiles = allFiles.filter(f => 
+					f.path.toLowerCase().includes(folderPath.toLowerCase()) || 
+					f.path.toLowerCase().includes(normalizedPath.toLowerCase())
+				).slice(0, 5);
+				if (similarFiles.length > 0) {
+					console.error(`Files with similar names:`, similarFiles.map(f => f.path));
+				}
+			} else {
+				console.error(`No markdown files found in vault at all - vault may not be ready yet`);
+			}
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : String(error);
 			const errorStack = error instanceof Error ? error.stack : undefined;
