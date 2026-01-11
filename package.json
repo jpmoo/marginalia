@@ -1,7 +1,7 @@
 {
 	"name": "marginalia",
-	"version": "Beta01",
-	"description": "Add margin notes to your Obsidian notes with AI-powered features via Ollama",
+	"version": "Beta02",
+	"description": "A powerful Obsidian plugin that allows you to add margin notes (marginalia) to your notes with highlights, hover tooltips, and AI-powered features for finding related content.",
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
