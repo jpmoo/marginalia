@@ -38,18 +38,24 @@ A powerful Obsidian plugin that allows you to add margin notes (marginalia) to y
 - **Transparency control**: Adjustable highlight transparency (default: 50%)
 - **Indicator visibility**: Choose to show pen only, highlight only, both, or neither
 
-### AI Features (Requires Ollama)
+### AI Features (Requires Ollama with specific models installed)
 
-The plugin includes powerful AI features for finding related marginalia and creating visualizations:
+The plugin includes powerful AI features for finding related marginalia and notes, and creating visualizations:
 
-- **Find Similar Marginalia**: Compare marginalia note text using embeddings
-- **Find Similar Selection**: Compare selected text across all marginalia using embeddings
-- **Find Similar Selection + Marginalia**: Combined comparison of both selection and note text using embeddings
-- **Create Table of Contents (TOC)**: Generate a formatted note linking to related marginalia/selections
-- **Create Canvas**: Generate a visual canvas with nodes for notes with related marginalia/selections
+**Similarity Search Functions**:
+- **Find Notes with Similar Marginalia**: Compare marginalia note text using embeddings to find other marginalia with similar notes
+- **Find Notes with Similar Selection**: Compare selected text using embeddings to find other marginalia with similar selections
+- **Find Notes with Similar Selection + Marginalia**: Combined comparison of both selection and note text using embeddings
+- **Find Notes Similar to Marginalia**: Compare marginalia note text to all note chunks in your vault to find similar notes
+- **Find Notes Similar to Selection**: Compare selected text to all note chunks in your vault to find similar notes
+- **Find Notes Similar to Selection + Marginalia**: Compare combined selection and marginalia to all note chunks in your vault to find similar notes
+
+**Export Features**:
+- **Create Table of Contents (TOC)**: Generate a formatted note with the current note (including selection and marginalia) at the top, followed by links to related notes
+- **Create Canvas**: Generate a visual canvas with nodes for all related notes
 - **AI-generated filenames**: Automatically generates descriptive filenames for TOC and Canvas files
 
-All AI features use configurable similarity thresholds and include progress indicators.
+All AI features use configurable similarity thresholds (default: 0.60) and include progress indicators.
 
 ## Requirements
 
@@ -65,9 +71,9 @@ To use the AI features, you need:
 - **Ollama server**: Either installed locally or accessible on your network
 - **Required models**:
   - `nomic-embed-text:latest` - For generating embeddings
-  - `phi3:latest` - For summarization and title generation
+  - `qwen2.5:3b-instruct` - For summarization and title generation
 
-The plugin will automatically check for Ollama availability on startup and save the status. AI features are only available when Ollama is accessible and both models are installed.
+The plugin will automatically check for Ollama and model availability on startup and save the status. AI features are only available when Ollama is accessible and both models are installed. Connection checks have a 10-second timeout to prevent hanging.
 
 ## Installation
 
@@ -104,7 +110,7 @@ The plugin will automatically check for Ollama availability on startup and save 
 
 1. **On selected text**: Select text in your note, right-click, and choose "Add marginalia"
 2. **On cursor position**: Right-click at any cursor position (even empty areas) to add a marginalia note
-3. Enter your note text in the modal
+3. Enter your note text in the modal (limited to 7000 characters with real-time countdown)
 4. Optionally choose a custom highlight color (or use the default)
 5. The selected area will be highlighted (or a visual indicator shown for cursor positions)
 
@@ -113,12 +119,17 @@ The plugin will automatically check for Ollama availability on startup and save 
 - **Hover**: Hover over any highlighted text to see the marginalia in a tooltip
 - **Sidebar**: Open the Marginalia sidebar (ribbon icon) to see all marginalia
 - **Current Note tab**: View and manage marginalia in the active file
+  - Shows a short preview (3 lines) of each marginalia
+  - Click the view button (eye icon) to see the full marginalia in a modal with active wiki links
 - **All Notes tab**: Browse all files that contain marginalia
 
 ### Managing Marginalia
 
 - **Jump to location**: Click any marginalia item in the sidebar to jump to its location
+- **View**: Click the view button (eye icon) to see the full marginalia with active wiki links
+  - View modal includes buttons to edit, access AI functions, delete, or close
 - **Edit**: Click the edit button (pencil icon) to modify a marginalia note
+  - Marginalia notes are limited to 7000 characters with a real-time countdown
 - **Delete**: Click the delete button (trash icon) to remove a marginalia (with confirmation)
 - **AI Tools**: Click the AI button (lightning icon) to access similarity search and export features
 
@@ -134,31 +145,58 @@ Access settings via: Settings → Marginalia
 **Ollama Configuration**:
 - Ollama Address: Server address (default: localhost)
 - Ollama Port: Server port (default: 11434)
-- Check Ollama: Verify server and model availability
-- Default Similarity Threshold: Default threshold for AI similarity searches (0.5-1.0)
+- Check Ollama Status: Verify server and model availability with real-time status indicators
+  - Three status circles show: Ollama server, nomic-embed-text model, and qwen2.5:3b-instruct model
+  - Green = available, Red = unavailable, Gray = not checked
+  - Status persists across sessions and updates when address/port changes
+  - 10-second timeout for connection checks
+- Default Similarity Threshold: Default threshold for AI similarity searches (0.5-1.0, default: 0.60)
+
+**Semantic Similarity**:
+- Marginalia uses AI-powered semantic similarity analysis to help surface similar notes, marginalia, and selections
+- Note that these features will be limited until embedding is 100% complete
+- Leave embedding active to continue to watch for new files and changes in the specified folders in your vault
+- Embedding Progress: Shows progress of note embedding process
+  - Not all AI functions will be available until embedding is complete
+  - System may slow until embedding is complete
+  - Takes longest the very first time
+  - May need to think about (and appear to pause on) bigger notes
+- Similarity Folders: Specify folders to monitor for note embedding (one per line)
+  - All subfolders are recursively processed
+  - Files are automatically embedded when created or modified
+  - Embedding can be paused/resumed at any time
 
 ## Data Storage
 
-Marginalia data including settings is stored in `.obsidian/plugins/marginalia/data.json` and includes:
-- All marginalia items with their text, positions, timestamps, and colors
-- Embeddings for AI features (when available)
+Marginalia data is stored in `.obsidian/plugins/marginalia/`:
+- **`data.json`**: Plugin settings
+- **`marginalia.json`**: All marginalia items with their text, positions, timestamps, colors, and embeddings
+- **`notes_embedding.json`**: Note embeddings for semantic similarity searches (created when embedding is enabled)
 
 ## AI Features Details
 
 ### Similarity Search
 
-The plugin uses cosine similarity on embeddings to find related marginalia:
-- **Find Similar Marginalia**: Compares the note text embeddings
-- **Find Similar Selection**: Compares the selected text embeddings
-- **Find Similar Selection + Marginalia**: Creates combined embeddings for more comprehensive matching
+The plugin uses cosine similarity on embeddings to find related marginalia and notes:
 
-Results show similarity scores and allow you to jump directly to related notes.
+**Marginalia-based searches** (compare to other marginalia):
+- **Find Notes with Similar Marginalia**: Compares the note text embeddings
+- **Find Notes with Similar Selection**: Compares the selected text embeddings
+- **Find Notes with Similar Selection + Marginalia**: Creates combined embeddings for more comprehensive matching
+
+**Note-based searches** (compare to note chunks in your vault):
+- **Find Notes Similar to Marginalia**: Compares marginalia note text to all embedded note chunks
+- **Find Notes Similar to Selection**: Compares selected text to all embedded note chunks
+- **Find Notes Similar to Selection + Marginalia**: Compares combined selection and marginalia to all embedded note chunks
+
+Results show similarity scores and allow you to jump directly to related notes. The current note is always included at the top of TOC exports with its selection and marginalia text.
 
 ### Export Features
 
 **Table of Contents**:
-- Creates a formatted note with links to the original note and all related notes
-- Includes selection text and marginalia text in code blocks
+- Creates a formatted note with the current note (including selection and marginalia text) at the top
+- Followed by links to all related notes with similarity scores
+- For marginalia-based searches, includes selection and marginalia text for each related item
 - Links jump directly to the marginalia location
 
 **Canvas**:
@@ -175,8 +213,9 @@ Both export features use AI to generate descriptive filenames based on the conte
 - Uses CodeMirror 6 for editor integration
 - Uses Obsidian's Plugin API
 - Canvas files use Obsidian's native canvas format
-- Embeddings generated via Ollama's `/api/embeddings` endpoint
-- Summarization and title generation via Ollama's `/api/generate` endpoint
+- Embeddings generated via Ollama's `/api/embeddings` endpoint using `nomic-embed-text`
+- Summarization and title generation via Ollama's `/api/generate` endpoint using `qwen2.5:3b-instruct`
+- All Ollama API calls include 10-second timeout protection
 
 ## License
 

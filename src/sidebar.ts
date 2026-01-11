@@ -1,4 +1,4 @@
-import { ItemView, WorkspaceLeaf, MarkdownView, Modal, TFile, Notice } from 'obsidian';
+import { ItemView, WorkspaceLeaf, MarkdownView, Modal, TFile, Notice, MarkdownRenderer, Component } from 'obsidian';
 import type MarginaliaPlugin from '../main';
 import { MarginaliaItem } from './types';
 
@@ -402,7 +402,17 @@ export class MarginaliaView extends ItemView {
 			const textDiv = preview.createDiv('marginalia-text-preview');
 			textDiv.textContent = textPreview.substring(0, 50) + (textPreview.length > 50 ? '...' : '');
 			const noteDiv = preview.createDiv('marginalia-note-preview');
-			noteDiv.textContent = item.note;
+			// Show only 3 lines preview of the marginalia note
+			const noteLines = (item.note || '').split('\n');
+			const previewLines = noteLines.slice(0, 3);
+			let previewText = previewLines.join('\n');
+			if (noteLines.length > 3 || previewText.length > 150) {
+				previewText = previewText.substring(0, 150) + '...';
+			}
+			noteDiv.textContent = previewText;
+			noteDiv.style.maxHeight = '3em'; // Approximately 3 lines
+			noteDiv.style.overflow = 'hidden';
+			noteDiv.style.textOverflow = 'ellipsis';
 			
 			// Add date/time display (shows last modified time)
 			if (item.timestamp) {
@@ -423,9 +433,27 @@ export class MarginaliaView extends ItemView {
 			}
 
 			const actions = itemEl.createDiv('marginalia-actions');
+			actions.style.display = 'flex';
+			actions.style.justifyContent = 'space-between';
+			actions.style.alignItems = 'center';
 			
+			// Left side: View, Edit, AI Functions buttons
+			const leftButtons = actions.createDiv();
+			leftButtons.style.display = 'flex';
+			leftButtons.style.gap = '5px';
+			
+			// View button with icon
+			const viewButton = leftButtons.createEl('button');
+			viewButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>';
+			viewButton.title = 'View';
+			viewButton.onmousedown = (e) => {
+				e.stopPropagation();
+				e.preventDefault();
+				this.showViewModal(item, activeFile.path);
+			};
+
 			// Edit button with icon
-			const editButton = actions.createEl('button');
+			const editButton = leftButtons.createEl('button');
 			editButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>';
 			editButton.title = 'Edit';
 			editButton.onmousedown = (e) => {
@@ -435,7 +463,7 @@ export class MarginaliaView extends ItemView {
 			};
 
 			// AI Functions button with zap icon
-			const aiButton = actions.createEl('button');
+			const aiButton = leftButtons.createEl('button');
 			aiButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg>';
 			aiButton.title = 'AI Functions';
 			aiButton.onmousedown = (e) => {
@@ -444,10 +472,16 @@ export class MarginaliaView extends ItemView {
 				this.showAIFunctionsModal(item, activeFile.path);
 			};
 
-			// Delete button with icon
-			const deleteButton = actions.createEl('button');
+			// Right side: Delete button (all the way to the right)
+			const rightButtons = actions.createDiv();
+			rightButtons.style.display = 'flex';
+			rightButtons.style.gap = '5px';
+			
+			// Delete button with icon (colored red)
+			const deleteButton = rightButtons.createEl('button');
 			deleteButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg>';
 			deleteButton.title = 'Delete';
+			deleteButton.style.color = 'var(--text-error)';
 			deleteButton.onmousedown = (e) => {
 				e.stopPropagation();
 				e.preventDefault();
@@ -835,6 +869,18 @@ export class MarginaliaView extends ItemView {
 		return count;
 	}
 
+	private showViewModal(item: MarginaliaItem, filePath: string) {
+		const modal = new ViewMarginaliaModal(this.app, this.plugin, item, filePath, () => {
+			// Edit handler - close view and open edit
+			modal.close();
+			this.showEditModal(item, filePath);
+		}, () => {
+			// Delete handler - refresh view after deletion
+			this.refresh();
+		});
+		modal.open();
+	}
+
 	private showEditModal(item: MarginaliaItem, filePath: string) {
 		const modal = new EditMarginaliaModal(this.app, item, this.plugin.settings.highlightColor, async (newNote: string, color?: string) => {
 			await this.plugin.updateMarginalia(filePath, item.id, newNote, color);
@@ -892,6 +938,13 @@ export class AIFunctionsModal extends Modal {
 		
 		contentEl.createEl('h2', { text: 'AI Functions' });
 
+		// Note above the menu
+		const noteEl = contentEl.createEl('p');
+		noteEl.style.marginBottom = '15px';
+		noteEl.style.color = 'var(--text-muted)';
+		noteEl.style.fontSize = '13px';
+		noteEl.textContent = 'Choose a function to run against this marginalia to find similar marginalia, selections, and/or notes from your vault.';
+
 		// Function selection dropdown
 		const functionSelect = contentEl.createEl('select');
 		functionSelect.style.width = '100%';
@@ -910,13 +963,22 @@ export class AIFunctionsModal extends Modal {
 		optionPlaceholder.selected = true;
 		
 		const optionSimilar = functionSelect.createEl('option', { value: 'similar' });
-		optionSimilar.textContent = 'Find Similar Marginalia';
+		optionSimilar.textContent = 'Find Notes with Similar Marginalia';
 		
 		const optionSimilarSelection = functionSelect.createEl('option', { value: 'similar-selection' });
-		optionSimilarSelection.textContent = 'Find Similar Selection';
+		optionSimilarSelection.textContent = 'Find Notes with Similar Selection';
 		
 		const optionSimilarCombined = functionSelect.createEl('option', { value: 'similar-combined' });
-		optionSimilarCombined.textContent = 'Find Similar Selection + Marginalia';
+		optionSimilarCombined.textContent = 'Find Notes with Similar Selection + Marginalia';
+		
+		const optionNotesSimilar = functionSelect.createEl('option', { value: 'notes-similar' });
+		optionNotesSimilar.textContent = 'Find Notes Similar to Marginalia';
+		
+		const optionNotesSimilarSelection = functionSelect.createEl('option', { value: 'notes-similar-selection' });
+		optionNotesSimilarSelection.textContent = 'Find Notes Similar to Selection';
+		
+		const optionNotesSimilarCombined = functionSelect.createEl('option', { value: 'notes-similar-combined' });
+		optionNotesSimilarCombined.textContent = 'Find Notes Similar to Selection + Marginalia';
 		
 		// No default selection
 		functionSelect.value = '';
@@ -945,6 +1007,12 @@ export class AIFunctionsModal extends Modal {
 			this.showFindSimilarUI('selection');
 		} else if (functionType === 'similar-combined') {
 			this.showFindSimilarUI('combined');
+		} else if (functionType === 'notes-similar') {
+			this.showFindNotesSimilarUI('note');
+		} else if (functionType === 'notes-similar-selection') {
+			this.showFindNotesSimilarUI('selection');
+		} else if (functionType === 'notes-similar-combined') {
+			this.showFindNotesSimilarUI('combined');
 		}
 	}
 
@@ -1241,6 +1309,317 @@ export class AIFunctionsModal extends Modal {
 		};
 	}
 
+	private showFindNotesSimilarUI(mode: 'note' | 'selection' | 'combined') {
+		// Check if item has the required embedding based on mode
+		let hasRequiredEmbedding = false;
+		let errorMessage = '';
+		
+		if (mode === 'note') {
+			hasRequiredEmbedding = !!(this.item.embedding && Array.isArray(this.item.embedding) && this.item.embedding.length > 0);
+			errorMessage = 'This marginalia does not have a note embedding. Please ensure Ollama is available and embeddings are generated.';
+		} else if (mode === 'selection') {
+			hasRequiredEmbedding = !!(this.item.selectionEmbedding && Array.isArray(this.item.selectionEmbedding) && this.item.selectionEmbedding.length > 0);
+			errorMessage = 'This marginalia does not have a selection embedding. The selected text may be empty or embeddings may not be generated.';
+		} else if (mode === 'combined') {
+			// For combined, we need at least one of note or selection text
+			const hasNote = this.plugin.hasMeaningfulText(this.item.note);
+			const hasSelection = this.plugin.hasMeaningfulText(this.item.text);
+			hasRequiredEmbedding = hasNote || hasSelection;
+			errorMessage = 'This marginalia needs at least a note or selection text to generate a combined embedding.';
+		}
+		
+		if (!hasRequiredEmbedding) {
+			this.functionContent.createEl('p', { 
+				text: errorMessage,
+				cls: 'mod-warning'
+			});
+			return;
+		}
+
+		// Similarity threshold slider
+		const sliderContainer = this.functionContent.createDiv();
+		sliderContainer.style.marginBottom = '15px';
+		
+		const label = sliderContainer.createEl('label');
+		label.textContent = 'Similarity Threshold: ';
+		label.style.display = 'block';
+		label.style.marginBottom = '5px';
+		
+		const sliderValue = sliderContainer.createSpan();
+		const defaultThreshold = this.plugin.settings.defaultSimilarity || 0.7;
+		sliderValue.textContent = defaultThreshold.toFixed(2);
+		sliderValue.style.marginLeft = '10px';
+		sliderValue.style.fontWeight = 'bold';
+		
+		const slider = sliderContainer.createEl('input', {
+			attr: {
+				type: 'range',
+				min: '0.5',
+				max: '1.0',
+				step: '0.05',
+				value: defaultThreshold.toString()
+			}
+		});
+		slider.style.width = '100%';
+		slider.oninput = (e) => {
+			const value = (e.target as HTMLInputElement).value;
+			sliderValue.textContent = parseFloat(value).toFixed(2);
+		};
+
+		// Run button
+		const runButton = this.functionContent.createEl('button', { text: 'Find Similar Notes' });
+		runButton.addClass('mod-cta');
+		runButton.style.width = '100%';
+		runButton.style.marginTop = '10px';
+
+		// Results container
+		const resultsContainer = this.functionContent.createDiv();
+		resultsContainer.style.marginTop = '20px';
+
+		runButton.onclick = async () => {
+			const threshold = parseFloat(slider.value);
+			runButton.disabled = true;
+			runButton.textContent = 'Searching...';
+			resultsContainer.empty();
+			
+			try {
+				let similarNotes: Array<{ filePath: string; similarity: number }>;
+				let resultLabel = '';
+				
+				if (mode === 'note') {
+					similarNotes = await this.plugin.findNotesSimilarToMarginalia(this.item, this.filePath, threshold);
+					resultLabel = 'similar notes (by marginalia)';
+				} else if (mode === 'selection') {
+					similarNotes = await this.plugin.findNotesSimilarToSelection(this.item, this.filePath, threshold);
+					resultLabel = 'similar notes (by selection)';
+				} else {
+					similarNotes = await this.plugin.findNotesSimilarToCombined(this.item, this.filePath, threshold);
+					resultLabel = 'similar notes (by combined)';
+				}
+				
+				// Store similar notes for use by export buttons
+				// Include the current note at the beginning with 100% similarity (it's the source)
+				const currentNoteEntry = {
+					item: { id: '', text: '', note: '', from: { line: 0, ch: 0 }, to: { line: 0, ch: 0 }, line: 0, ch: 0 } as MarginaliaItem,
+					filePath: this.filePath,
+					similarity: 1.0 // 100% similarity (it's the source note)
+				};
+				
+				this.currentSimilarItems = [
+					currentNoteEntry,
+					...similarNotes.map(note => ({
+						item: { id: '', text: '', note: '', from: { line: 0, ch: 0 }, to: { line: 0, ch: 0 }, line: 0, ch: 0 } as MarginaliaItem,
+						filePath: note.filePath,
+						similarity: note.similarity
+					}))
+				];
+				
+				if (this.currentSimilarItems.length === 0) {
+					resultsContainer.createEl('p', { text: `No ${resultLabel} found above the threshold.` });
+				} else {
+					// Count similar notes (excluding the current note)
+					const similarCount = this.currentSimilarItems.length - 1;
+					const totalCount = this.currentSimilarItems.length;
+					resultsContainer.createEl('h3', { text: `Found ${totalCount} ${resultLabel} (${similarCount} similar + 1 current):` });
+					
+					const list = resultsContainer.createEl('ul');
+					list.style.listStyle = 'none';
+					list.style.padding = '0';
+					
+					for (const note of this.currentSimilarItems) {
+						const li = list.createEl('li');
+						li.style.marginBottom = '10px';
+						li.style.padding = '8px';
+						li.style.border = '1px solid var(--background-modifier-border)';
+						li.style.borderRadius = '4px';
+						
+						const link = li.createEl('a', { text: note.filePath });
+						link.style.cursor = 'pointer';
+						link.style.textDecoration = 'underline';
+						link.style.color = 'var(--text-accent)';
+						link.onclick = async () => {
+							const file = this.app.vault.getAbstractFileByPath(note.filePath);
+							if (file instanceof TFile) {
+								await this.app.workspace.openLinkText(note.filePath, '', true);
+								this.close();
+							}
+						};
+						
+						li.createEl('br');
+						const similarity = li.createSpan();
+						if (note.filePath === this.filePath) {
+							similarity.textContent = `(Current Note)`;
+							similarity.style.fontSize = '0.85em';
+							similarity.style.color = 'var(--text-accent)';
+							similarity.style.fontWeight = 'bold';
+						} else {
+							similarity.textContent = `Similarity: ${(note.similarity * 100).toFixed(1)}%`;
+							similarity.style.fontSize = '0.85em';
+							similarity.style.color = 'var(--text-muted)';
+						}
+					}
+					
+					// Add filename input section with buttons inside
+					const filenameContainer = resultsContainer.createDiv();
+					filenameContainer.style.marginTop = '20px';
+					filenameContainer.style.marginBottom = '20px';
+					filenameContainer.style.padding = '15px';
+					filenameContainer.style.backgroundColor = 'var(--background-secondary)';
+					filenameContainer.style.borderRadius = '4px';
+					filenameContainer.style.border = '1px solid var(--background-modifier-border)';
+					
+					const filenameLabel = filenameContainer.createEl('label');
+					filenameLabel.textContent = 'Export file name:';
+					filenameLabel.style.display = 'block';
+					filenameLabel.style.marginBottom = '8px';
+					filenameLabel.style.fontWeight = '500';
+					
+					const filenameInputContainer = filenameContainer.createDiv();
+					filenameInputContainer.style.display = 'flex';
+					filenameInputContainer.style.gap = '8px';
+					filenameInputContainer.style.alignItems = 'center';
+					filenameInputContainer.style.marginBottom = '15px';
+					
+					const filenameInput = filenameInputContainer.createEl('input', {
+						attr: {
+							type: 'text',
+							placeholder: 'Enter filename...'
+						}
+					});
+					filenameInput.style.flex = '1';
+					filenameInput.style.padding = '6px 10px';
+					filenameInput.style.border = '1px solid var(--background-modifier-border)';
+					filenameInput.style.borderRadius = '4px';
+					filenameInput.style.fontSize = '0.9em';
+					
+					const regenerateButton = filenameInputContainer.createEl('button', { text: 'Regenerate Name' });
+					regenerateButton.style.padding = '6px 12px';
+					regenerateButton.style.border = '1px solid var(--background-modifier-border)';
+					regenerateButton.style.borderRadius = '4px';
+					regenerateButton.style.background = 'var(--background-primary)';
+					regenerateButton.style.cursor = 'pointer';
+					regenerateButton.style.fontSize = '0.9em';
+					regenerateButton.style.whiteSpace = 'nowrap';
+					
+					// Generate initial AI suggestion
+					let currentFileName = '';
+					const generateFileName = async () => {
+						regenerateButton.disabled = true;
+						regenerateButton.textContent = 'Generating...';
+						try {
+							const suggestedName = await this.generateAITitle('TOC');
+							currentFileName = suggestedName;
+							filenameInput.value = suggestedName;
+						} catch (error) {
+							const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+							currentFileName = `Marginalia ${timestamp}`;
+							filenameInput.value = currentFileName;
+						}
+						regenerateButton.disabled = false;
+						regenerateButton.textContent = 'Regenerate Name';
+					};
+					
+					regenerateButton.onclick = generateFileName;
+					
+					// Update currentFileName when user types
+					filenameInput.oninput = () => {
+						currentFileName = filenameInput.value.trim();
+					};
+					
+					// Generate initial suggestion
+					await generateFileName();
+					
+					// Add action buttons inside the filename container
+					const buttonContainer = filenameContainer.createDiv();
+					buttonContainer.style.display = 'flex';
+					buttonContainer.style.gap = '10px';
+					
+					const tocButtonContainer = buttonContainer.createDiv();
+					tocButtonContainer.style.display = 'flex';
+					tocButtonContainer.style.alignItems = 'center';
+					tocButtonContainer.style.gap = '8px';
+					tocButtonContainer.style.flex = '1';
+					
+					const tocButton = tocButtonContainer.createEl('button', { text: 'Create Table of Contents Note' });
+					tocButton.addClass('mod-cta');
+					tocButton.style.flex = '1';
+					
+					const tocProgress = tocButtonContainer.createSpan();
+					tocProgress.style.display = 'none';
+					tocProgress.style.width = '16px';
+					tocProgress.style.height = '16px';
+					tocProgress.style.border = '2px solid var(--text-muted)';
+					tocProgress.style.borderTop = '2px solid var(--text-accent)';
+					tocProgress.style.borderRadius = '50%';
+					tocProgress.style.animation = 'spin 1s linear infinite';
+					
+					tocButton.onclick = async () => {
+						const fileName = filenameInput.value.trim() || currentFileName || 'Marginalia TOC';
+						if (!fileName) {
+							new Notice('Please enter a filename');
+							return;
+						}
+						tocButton.disabled = true;
+						tocButton.style.opacity = '0.6';
+						tocProgress.style.display = 'block';
+						try {
+							await this.createTableOfContents(fileName);
+						} finally {
+							tocButton.disabled = false;
+							tocButton.style.opacity = '1';
+							tocProgress.style.display = 'none';
+						}
+					};
+					
+					const canvasButtonContainer = buttonContainer.createDiv();
+					canvasButtonContainer.style.display = 'flex';
+					canvasButtonContainer.style.alignItems = 'center';
+					canvasButtonContainer.style.gap = '8px';
+					canvasButtonContainer.style.flex = '1';
+					
+					const canvasButton = canvasButtonContainer.createEl('button', { text: 'Create Canvas' });
+					canvasButton.addClass('mod-cta');
+					canvasButton.style.flex = '1';
+					
+					const canvasProgress = canvasButtonContainer.createSpan();
+					canvasProgress.style.display = 'none';
+					canvasProgress.style.width = '16px';
+					canvasProgress.style.height = '16px';
+					canvasProgress.style.border = '2px solid var(--text-muted)';
+					canvasProgress.style.borderTop = '2px solid var(--text-accent)';
+					canvasProgress.style.borderRadius = '50%';
+					canvasProgress.style.animation = 'spin 1s linear infinite';
+					
+					canvasButton.onclick = async () => {
+						const fileName = filenameInput.value.trim() || currentFileName || 'Marginalia Canvas';
+						if (!fileName) {
+							new Notice('Please enter a filename');
+							return;
+						}
+						canvasButton.disabled = true;
+						canvasButton.style.opacity = '0.6';
+						canvasProgress.style.display = 'block';
+						try {
+							await this.createCanvas(fileName);
+						} finally {
+							canvasButton.disabled = false;
+							canvasButton.style.opacity = '1';
+							canvasProgress.style.display = 'none';
+						}
+					};
+				}
+			} catch (error: any) {
+				resultsContainer.createEl('p', { 
+					text: `Error: ${error.message}`,
+					cls: 'mod-warning'
+				});
+			} finally {
+				runButton.disabled = false;
+				runButton.textContent = 'Find Similar Notes';
+			}
+		};
+	}
+
 	private async generateAITitle(fileType: 'TOC' | 'Canvas'): Promise<string> {
 		// Check if Ollama is available
 		if (!this.plugin.settings.ollamaAvailable) {
@@ -1261,18 +1640,26 @@ export class AIFunctionsModal extends Modal {
 			}
 			allText += '\n---\n\n';
 			
-			// Add similar items text
+			// Add similar items text (only if they have marginalia items, not just file paths)
 			for (const similar of this.currentSimilarItems) {
-				if (similar.item.text) {
-					allText += `Selection: "${similar.item.text}"\n`;
-				}
-				if (similar.item.note) {
-					allText += `Marginalia: ${similar.item.note}\n`;
+				if (similar.item && similar.item.id) {
+					// This is a marginalia result
+					if (similar.item.text) {
+						allText += `Selection: "${similar.item.text}"\n`;
+					}
+					if (similar.item.note) {
+						allText += `Marginalia: ${similar.item.note}\n`;
+					}
+				} else {
+					// This is a note result - just add the file path
+					const similarFile = this.app.vault.getAbstractFileByPath(similar.filePath);
+					const similarFileName = similarFile instanceof TFile ? similarFile.basename : similar.filePath;
+					allText += `Note: ${similarFileName}\n`;
 				}
 				allText += '\n---\n\n';
 			}
 
-			// Call Phi3 to generate a title
+			// Call qwen2.5:3b-instruct to generate a title
 			const address = this.plugin.settings.ollamaAddress || 'localhost';
 			const port = this.plugin.settings.ollamaPort || '11434';
 			const baseUrl = `http://${address}:${port}`;
@@ -1302,7 +1689,7 @@ ${allText}`;
 					'Content-Type': 'application/json'
 				},
 				body: JSON.stringify({
-					model: 'phi3:latest',
+					model: 'qwen2.5:3b-instruct',
 					prompt: prompt,
 					stream: false
 				})
@@ -1364,7 +1751,7 @@ ${allText}`;
 				
 				return title;
 			} else {
-				throw new Error(`Phi3 API error: ${response.statusText}`);
+				throw new Error(`qwen2.5:3b-instruct API error: ${response.statusText}`);
 			}
 		} catch (error) {
 			console.error('Error generating AI title:', error);
@@ -1387,14 +1774,19 @@ ${allText}`;
 			const finalFileName = `${cleanFileName}.md`;
 			const filePath = basePath ? `${basePath}/${finalFileName}` : finalFileName;
 			
+			// Detect if this is a note-based search (new functions) vs marginalia-based search (old functions)
+			// Note results have items with empty IDs, marginalia results have items with actual IDs
+			const isNoteBasedSearch = this.currentSimilarItems.length > 0 && 
+				this.currentSimilarItems.every(item => !item.item.id || item.item.id === '');
+			
 			// Build table of contents content
-			let content = `# Table of Contents - Similar Marginalia\n\n`;
+			let content = `# Table of Contents - Similar ${isNoteBasedSearch ? 'Notes' : 'Marginalia'}\n\n`;
 			content += `Generated: ${new Date().toLocaleString()}\n\n`;
 			
-			// Original note section
-			content += `## Original Note\n\n`;
+			// Always include current note with selection and marginalia at the top
 			const originalFile = this.app.vault.getAbstractFileByPath(this.filePath);
 			const originalFileName = originalFile instanceof TFile ? originalFile.basename : this.filePath;
+			content += `## Current Note\n\n`;
 			content += `- [[${this.filePath}|${originalFileName}]]\n`;
 			if (this.item.text) {
 				content += `    - **Selection:**\n`;
@@ -1414,26 +1806,35 @@ ${allText}`;
 			}
 			content += `\n`;
 			
-			// Related notes section
+			// Related notes section (exclude current note from this list)
 			content += `## Related Notes\n\n`;
 			for (const similar of this.currentSimilarItems) {
+				// Skip the current note in the related notes list
+				if (similar.filePath === this.filePath) {
+					continue;
+				}
+				
 				const similarFile = this.app.vault.getAbstractFileByPath(similar.filePath);
 				const similarFileName = similarFile instanceof TFile ? similarFile.basename : similar.filePath;
 				content += `- [[${similar.filePath}|${similarFileName}]] (Similarity: ${(similar.similarity * 100).toFixed(1)}%)\n`;
-				if (similar.item.text) {
-					content += `    - **Selection:**\n`;
-					// Indent each line of the text under the subheading
-					const textLines = similar.item.text.split('\n');
-					for (const line of textLines) {
-						content += `        ${line}\n`;
+				
+				// Only show selection/marginalia if this is a marginalia result (not a note result)
+				if (similar.item && similar.item.id) {
+					if (similar.item.text) {
+						content += `    - **Selection:**\n`;
+						// Indent each line of the text under the subheading
+						const textLines = similar.item.text.split('\n');
+						for (const line of textLines) {
+							content += `        ${line}\n`;
+						}
 					}
-				}
-				if (similar.item.note) {
-					content += `    - **Marginalia:**\n`;
-					// Indent each line of the note under the subheading
-					const noteLines = similar.item.note.split('\n');
-					for (const line of noteLines) {
-						content += `        ${line}\n`;
+					if (similar.item.note) {
+						content += `    - **Marginalia:**\n`;
+						// Indent each line of the note under the subheading
+						const noteLines = similar.item.note.split('\n');
+						for (const line of noteLines) {
+							content += `        ${line}\n`;
+						}
 					}
 				}
 				content += `\n`;
@@ -1490,14 +1891,8 @@ ${allText}`;
 			// Collect all unique file paths (original + similar items)
 			const allFilePaths: string[] = [];
 			
-			// Add original note path if it exists
-			const originalFile = this.app.vault.getAbstractFileByPath(this.filePath);
-			if (originalFile instanceof TFile && !addedFiles.has(this.filePath)) {
-				allFilePaths.push(this.filePath);
-				addedFiles.add(this.filePath);
-			}
-			
-			// Add similar item file paths (avoiding duplicates)
+			// Add all file paths from currentSimilarItems (which already includes current note for new functions)
+			// This handles both old functions (marginalia results) and new functions (note results)
 			for (const similar of this.currentSimilarItems) {
 				if (!addedFiles.has(similar.filePath)) {
 					const similarFile = this.app.vault.getAbstractFileByPath(similar.filePath);
@@ -1506,6 +1901,14 @@ ${allText}`;
 						addedFiles.add(similar.filePath);
 					}
 				}
+			}
+			
+			// Also add original note path if it exists and wasn't already added
+			// (This ensures it's included for old functions that don't add it to currentSimilarItems)
+			const originalFile = this.app.vault.getAbstractFileByPath(this.filePath);
+			if (originalFile instanceof TFile && !addedFiles.has(this.filePath)) {
+				allFilePaths.push(this.filePath);
+				addedFiles.add(this.filePath);
 			}
 			
 			// Create nodes in a grid layout
@@ -1625,22 +2028,65 @@ export class EditMarginaliaModal extends Modal {
 		const { contentEl } = this;
 		contentEl.empty();
 
-		contentEl.createEl('h2', { text: 'Edit Margin Note' });
+		contentEl.createEl('h2', { text: 'Edit Marginalia' });
 
 		const textPreview = contentEl.createDiv();
+		textPreview.style.marginBottom = '15px';
+		textPreview.style.padding = '10px';
+		textPreview.style.backgroundColor = 'var(--background-secondary)';
+		textPreview.style.borderRadius = '4px';
+		textPreview.style.maxHeight = '20em'; // Max 20 lines high (approximately 1em per line)
+		textPreview.style.overflowY = 'auto';
+		textPreview.style.whiteSpace = 'pre-wrap';
+		textPreview.style.height = 'auto';
 		textPreview.createEl('p', { 
-			text: `Selected text: "${this.item.text || 'No selection'}"` 
+			text: `Selected text: "${this.item.text || 'No selection'}"`,
+			attr: { style: 'margin: 0; font-size: 0.9em; color: var(--text-muted);' }
 		});
 
 		const input = contentEl.createEl('textarea', {
 			attr: {
 				placeholder: 'Enter your margin note...',
-				rows: '5'
+				rows: '5',
+				maxlength: '7000'
 			}
 		});
 		input.style.width = '100%';
 		input.style.minHeight = '100px';
 		input.value = this.item.note;
+
+		// Character counter
+		const charCounter = contentEl.createDiv();
+		charCounter.style.marginTop = '5px';
+		charCounter.style.fontSize = '0.85em';
+		charCounter.style.color = 'var(--text-muted)';
+		charCounter.style.textAlign = 'right';
+		const MAX_CHARS = 7000;
+		
+		const updateCounter = () => {
+			const currentLength = input.value.length;
+			const remaining = MAX_CHARS - currentLength;
+			charCounter.textContent = `${currentLength}/${MAX_CHARS} characters`;
+			if (remaining < 100) {
+				charCounter.style.color = 'var(--text-error)';
+			} else if (remaining < 500) {
+				charCounter.style.color = 'var(--text-warning)';
+			} else {
+				charCounter.style.color = 'var(--text-muted)';
+			}
+		};
+
+		// Limit input to 7000 characters
+		input.addEventListener('input', (e: Event) => {
+			const target = e.target as HTMLTextAreaElement;
+			if (target.value.length > MAX_CHARS) {
+				target.value = target.value.substring(0, MAX_CHARS);
+			}
+			updateCounter();
+		});
+
+		// Initialize counter
+		updateCounter();
 
 		// Color picker
 		const colorContainer = contentEl.createDiv();
@@ -1679,31 +2125,20 @@ export class EditMarginaliaModal extends Modal {
 		const buttonContainer = contentEl.createDiv();
 		buttonContainer.style.marginTop = '10px';
 		buttonContainer.style.display = 'flex';
-		buttonContainer.style.justifyContent = 'space-between';
+		buttonContainer.style.justifyContent = 'flex-end';
 		buttonContainer.style.gap = '10px';
-
-		// Left side: Delete button
-		const leftButtons = buttonContainer.createDiv();
-		leftButtons.style.display = 'flex';
-		leftButtons.style.gap = '10px';
-		
-		if (this.onDelete) {
-			const deleteButton = leftButtons.createEl('button', { text: 'Delete' });
-			deleteButton.onclick = () => {
-				this.close();
-				this.onDelete!();
-			};
-		}
 
 		// Right side: Cancel and Save buttons
 		const rightButtons = buttonContainer.createDiv();
 		rightButtons.style.display = 'flex';
 		rightButtons.style.gap = '10px';
 
-		const cancelButton = rightButtons.createEl('button', { text: 'Cancel' });
+		const cancelButton = rightButtons.createEl('button');
+		cancelButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="9" y1="9" x2="15" y2="15"></line><line x1="15" y1="9" x2="9" y2="15"></line></svg> Cancel';
 		cancelButton.onclick = () => this.close();
 
-		const submitButton = rightButtons.createEl('button', { text: 'Save' });
+		const submitButton = rightButtons.createEl('button');
+		submitButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg> Save';
 		submitButton.addClass('mod-cta');
 		submitButton.onclick = () => {
 			// Always save the color value (default or custom) to the item
@@ -1719,6 +2154,130 @@ export class EditMarginaliaModal extends Modal {
 	onClose() {
 		const { contentEl } = this;
 		contentEl.empty();
+	}
+}
+
+export class ViewMarginaliaModal extends Modal {
+	private item: MarginaliaItem;
+	private plugin: MarginaliaPlugin;
+	private filePath: string;
+	private onEdit: () => void;
+	private onDelete: () => void;
+	private component: Component;
+
+	constructor(app: any, plugin: MarginaliaPlugin, item: MarginaliaItem, filePath: string, onEdit: () => void, onDelete: () => void) {
+		super(app);
+		this.item = item;
+		this.plugin = plugin;
+		this.filePath = filePath;
+		this.onEdit = onEdit;
+		this.onDelete = onDelete;
+		// Create a Component instance for markdown rendering
+		this.component = new Component();
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.empty();
+
+		contentEl.createEl('h2', { text: 'View Marginalia' });
+
+		// Show selected text preview
+		if (this.item.text) {
+			const textPreview = contentEl.createDiv();
+			textPreview.style.marginBottom = '15px';
+			textPreview.style.padding = '10px';
+			textPreview.style.backgroundColor = 'var(--background-secondary)';
+			textPreview.style.borderRadius = '4px';
+			textPreview.style.maxHeight = '20em'; // Max 20 lines high (approximately 1em per line)
+			textPreview.style.overflowY = 'auto';
+			textPreview.style.whiteSpace = 'pre-wrap';
+			textPreview.style.height = 'auto';
+			textPreview.createEl('p', { 
+				text: `Selected text: "${this.item.text}"`,
+				attr: { style: 'margin: 0; font-size: 0.9em; color: var(--text-muted);' }
+			});
+		}
+
+		// Render note with active wiki links
+		const noteContainer = contentEl.createDiv();
+		noteContainer.style.marginBottom = '20px';
+		noteContainer.style.padding = '15px';
+		noteContainer.style.backgroundColor = 'var(--background-primary)';
+		noteContainer.style.border = '1px solid var(--background-modifier-border)';
+		noteContainer.style.borderRadius = '4px';
+		noteContainer.style.height = '20em'; // 20 lines high (approximately 1em per line)
+		noteContainer.style.overflowY = 'auto';
+
+		// Use Obsidian's MarkdownRenderer to render with active wiki links
+		// Load the component before using it to manage lifecycle
+		this.component.load();
+		MarkdownRenderer.renderMarkdown(
+			this.item.note || '(No note)',
+			noteContainer,
+			this.filePath,
+			this.component
+		);
+
+		// Button container - matching edit modal layout
+		const buttonContainer = contentEl.createDiv();
+		buttonContainer.style.marginTop = '10px';
+		buttonContainer.style.display = 'flex';
+		buttonContainer.style.justifyContent = 'space-between';
+		buttonContainer.style.gap = '10px';
+
+		// Left side: Delete button
+		const leftButtons = buttonContainer.createDiv();
+		leftButtons.style.display = 'flex';
+		leftButtons.style.gap = '10px';
+		
+		const deleteButton = leftButtons.createEl('button');
+		deleteButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><line x1="10" y1="11" x2="10" y2="17"></line><line x1="14" y1="11" x2="14" y2="17"></line></svg> Delete';
+		deleteButton.addClass('mod-warning');
+		deleteButton.onclick = () => {
+			const deleteModal = new DeleteConfirmationModal(this.app, async () => {
+				await this.plugin.deleteMarginalia(this.filePath, this.item.id);
+				this.close();
+				this.onDelete(); // Refresh the parent view
+			});
+			deleteModal.open();
+		};
+
+		// Right side: Edit, AI Functions, and Close buttons (Close all the way to the right)
+		const rightButtons = buttonContainer.createDiv();
+		rightButtons.style.display = 'flex';
+		rightButtons.style.gap = '10px';
+
+		// Edit button with icon
+		const editButton = rightButtons.createEl('button');
+		editButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg> Edit';
+		editButton.addClass('mod-cta');
+		editButton.onclick = () => {
+			this.onEdit();
+		};
+
+		// AI Functions button with icon
+		const aiFunctionsButton = rightButtons.createEl('button');
+		aiFunctionsButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg> AI Functions';
+		aiFunctionsButton.onclick = () => {
+			this.close();
+			const aiModal = new AIFunctionsModal(this.app, this.plugin, this.item, this.filePath);
+			aiModal.open();
+		};
+
+		// Close button with X icon (all the way to the right)
+		const closeButton = rightButtons.createEl('button');
+		closeButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="9" y1="9" x2="15" y2="15"></line><line x1="15" y1="9" x2="9" y2="15"></line></svg> Close';
+		closeButton.onclick = () => this.close();
+	}
+
+	onClose() {
+		const { contentEl } = this;
+		contentEl.empty();
+		// Unload the component to clean up resources
+		if (this.component) {
+			this.component.unload();
+		}
 	}
 }
 

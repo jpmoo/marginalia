@@ -3,7 +3,25 @@ import { MarginaliaView, EditMarginaliaModal, DeleteConfirmationModal } from './
 import { MarginaliaEditorExtension } from './src/editorExtension';
 import { MarginaliaData, MarginaliaItem } from './src/types';
 
-const DATA_FILE = 'marginalia-data.json';
+// Settings are stored in data.json via Obsidian's loadData()/saveData()
+// Marginalia data is stored in marginalia.json
+// Note embeddings are stored in notes_embedding.json
+
+// Interface for note embedding chunks
+export interface NoteEmbeddingChunk {
+	chunk_id: string;
+	char_start: number;
+	char_end: number;
+	vector: number[];
+}
+
+// Interface for note embedding entries
+export interface NoteEmbedding {
+	embedding_id: string;
+	source_path: string;
+	noteEdited: string;
+	chunks: NoteEmbeddingChunk[];
+}
 
 export interface MarginaliaSettings {
 	highlightColor: string;
@@ -12,9 +30,14 @@ export interface MarginaliaSettings {
 	ollamaPort: string;
 	indicatorVisibility: 'pen' | 'highlight' | 'both' | 'neither';
 	penIconPosition: 'left' | 'right'; // Position of pen icon in margin
-	ollamaAvailable: boolean; // Track if Ollama is available
+	ollamaAvailable: boolean; // Track if Ollama is available (server reachable AND both models available)
+	ollamaServerStatus: 'available' | 'unavailable' | 'unknown'; // Individual server status
+	nomicModelStatus: 'available' | 'unavailable' | 'unknown'; // Individual nomic model status
+	qwenModelStatus: 'available' | 'unavailable' | 'unknown'; // Individual qwen model status
 	sortOrder: 'position' | 'date-asc' | 'date-desc'; // Sort order for current note marginalia
 	defaultSimilarity: number; // Default similarity threshold for AI functions (0.5 to 1.0)
+	embeddingOn: boolean; // Whether note embedding is active
+	similarityFolders: string; // Folders to include in similarity analysis (comma-separated)
 }
 
 const DEFAULT_SETTINGS: MarginaliaSettings = {
@@ -25,19 +48,64 @@ const DEFAULT_SETTINGS: MarginaliaSettings = {
 	indicatorVisibility: 'both',
 	penIconPosition: 'right', // Default to right margin
 	ollamaAvailable: false,
+	ollamaServerStatus: 'unknown',
+	nomicModelStatus: 'unknown',
+	qwenModelStatus: 'unknown',
 	sortOrder: 'position',
-	defaultSimilarity: 0.7 // Default similarity threshold for AI functions
+	defaultSimilarity: 0.60, // Default similarity threshold for AI functions
+	embeddingOn: false, // Note embedding starts as inactive
+	similarityFolders: '' // Empty by default, user specifies folders
 };
 
 export default class MarginaliaPlugin extends Plugin {
 	public marginaliaData: Map<string, MarginaliaData> = new Map();
 	private sidebarView: MarginaliaView | null = null;
 	settings: MarginaliaSettings;
+	public embeddingProgressCallback: (() => void) | null = null;
+	private embeddingQueue: Set<string> = new Set(); // Queue of file paths to process
+	private isProcessingEmbeddingQueue: boolean = false;
+	private embeddingDebounceTimers: Map<string, NodeJS.Timeout> = new Map();
+	private embeddingRetryCount: Map<string, number> = new Map(); // Track retry count per file
+	private readonly MAX_RETRIES = 3; // Maximum number of retries for a file
+	private embeddingListenersRegistered: boolean = false; // Track if listeners are already registered
 
 	async onload() {
 
 		// Load settings and merge with defaults
-		const loadedSettings = await this.loadData();
+		const loadedData = await this.loadData();
+		
+		// Backwards compatibility: Check if marginalia data exists in data.json and migrate it
+		let loadedSettings: any = loadedData || {};
+		let marginaliaDataToMigrate: Record<string, MarginaliaData> | null = null;
+		
+		// Check if data.json contains marginalia data (file paths as keys with MarginaliaData structure)
+		// Settings have known property names, marginalia data has file paths as keys
+		const settingsKeys = Object.keys(DEFAULT_SETTINGS);
+		const potentialMarginaliaKeys: string[] = [];
+		
+		for (const key in loadedData) {
+			// If key is not a known setting and looks like a file path, it might be marginalia data
+			if (!settingsKeys.includes(key) && typeof loadedData[key] === 'object' && loadedData[key] !== null) {
+				const value = loadedData[key];
+				// Check if it has the structure of MarginaliaData (has 'items' array)
+				if (Array.isArray(value.items) && value.items.length > 0) {
+					// Verify items structure looks like MarginaliaItem
+					const firstItem = value.items[0];
+					if (firstItem && typeof firstItem === 'object' && ('id' in firstItem || 'text' in firstItem || 'note' in firstItem)) {
+						potentialMarginaliaKeys.push(key);
+					}
+				}
+			}
+		}
+		
+		// If we found marginalia data, extract it
+		if (potentialMarginaliaKeys.length > 0) {
+			marginaliaDataToMigrate = {};
+			for (const key of potentialMarginaliaKeys) {
+				marginaliaDataToMigrate[key] = loadedData[key] as MarginaliaData;
+				delete loadedSettings[key];
+			}
+		}
 		
 		// Handle migration from 'transparency' to 'opacity'
 		if (loadedSettings && 'transparency' in loadedSettings && !('opacity' in loadedSettings)) {
@@ -50,14 +118,69 @@ export default class MarginaliaPlugin extends Plugin {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, loadedSettings || {});
 		
 		// Ensure critical settings have valid values (defensive programming)
-		if (!this.settings.highlightColor || typeof this.settings.highlightColor !== 'string') {
-			this.settings.highlightColor = DEFAULT_SETTINGS.highlightColor;
+		// Only validate/reset if the value is truly invalid (not just missing)
+		// This prevents overwriting valid saved values with defaults
+		if (loadedSettings && loadedSettings.highlightColor !== undefined) {
+			// Value was explicitly loaded - validate it strictly
+			if (typeof loadedSettings.highlightColor !== 'string' || loadedSettings.highlightColor.trim() === '') {
+				// Invalid value - reset to default
+				this.settings.highlightColor = DEFAULT_SETTINGS.highlightColor;
+			}
+			// If valid, keep the loaded value (already in this.settings from Object.assign)
 		}
-		if (typeof this.settings.opacity !== 'number' || this.settings.opacity < 0.1 || this.settings.opacity > 1) {
-			this.settings.opacity = DEFAULT_SETTINGS.opacity;
+		// If highlightColor wasn't in loadedSettings, Object.assign already set it to default
+		
+		if (loadedSettings && loadedSettings.opacity !== undefined) {
+			// Value was explicitly loaded - validate it strictly
+			if (typeof loadedSettings.opacity !== 'number' || isNaN(loadedSettings.opacity) || loadedSettings.opacity < 0.1 || loadedSettings.opacity > 1) {
+				// Invalid value - reset to default
+				this.settings.opacity = DEFAULT_SETTINGS.opacity;
+			}
+			// If valid, keep the loaded value (already in this.settings from Object.assign)
+		}
+		// If opacity wasn't in loadedSettings, Object.assign already set it to default
+		
+		// Validate new settings fields
+		if (loadedSettings && loadedSettings.embeddingOn !== undefined) {
+			if (typeof loadedSettings.embeddingOn !== 'boolean') {
+				this.settings.embeddingOn = DEFAULT_SETTINGS.embeddingOn;
+			}
 		}
 		
-		// Always save to ensure settings are persisted correctly
+		if (loadedSettings && loadedSettings.similarityFolders !== undefined) {
+			if (typeof loadedSettings.similarityFolders !== 'string') {
+				this.settings.similarityFolders = DEFAULT_SETTINGS.similarityFolders;
+			}
+		}
+		
+		// Backwards compatibility: Migrate marginalia data from data.json to marginalia.json if found
+		if (marginaliaDataToMigrate) {
+			try {
+				const marginaliaPath = this.getMarginaliaFilePath();
+				const marginaliaExists = await this.app.vault.adapter.exists(marginaliaPath);
+				
+				// Read existing marginalia data if it exists
+				let existingMarginalia: Record<string, MarginaliaData> = {};
+				if (marginaliaExists) {
+					const existingData = await this.app.vault.adapter.read(marginaliaPath);
+					if (existingData) {
+						existingMarginalia = JSON.parse(existingData);
+					}
+				}
+				
+				// Merge migrated data with existing data (migrated data takes precedence for conflicts)
+				const mergedMarginalia = Object.assign({}, existingMarginalia, marginaliaDataToMigrate);
+				
+				// Write to marginalia.json
+				await this.app.vault.adapter.write(marginaliaPath, JSON.stringify(mergedMarginalia, null, 2));
+				
+				console.log(`Migrated ${Object.keys(marginaliaDataToMigrate).length} file(s) of marginalia data from data.json to marginalia.json`);
+			} catch (error) {
+				console.error('Error migrating marginalia data:', error);
+			}
+		}
+
+		// Always save to ensure settings are persisted correctly (this will save cleaned settings without marginalia data)
 		await this.saveData(this.settings);
 		
 		this.applySettings();
@@ -87,6 +210,18 @@ export default class MarginaliaPlugin extends Plugin {
 
 		// Load existing marginalia data
 		await this.loadMarginaliaData();
+
+		// If embedding is on, ensure the embedding file exists and start monitoring
+		if (this.settings.embeddingOn) {
+			try {
+				await this.initializeEmbeddingFile();
+				// Start monitoring folders for embedding
+				this.startEmbeddingMonitor();
+			} catch (error) {
+				console.error('Error initializing embedding file on load:', error);
+				// Don't fail plugin load, just log the error
+			}
+		}
 
 		// Check Ollama availability on startup (non-blocking)
 		setTimeout(async () => {
@@ -203,7 +338,7 @@ export default class MarginaliaPlugin extends Plugin {
 					color: color
 				});
 			}
-		});
+		}, text);
 
 		modal.open();
 	}
@@ -627,13 +762,826 @@ export default class MarginaliaPlugin extends Plugin {
 		return false;
 	}
 
-	private getDataFilePath(): string {
-		return `${this.app.vault.configDir}/plugins/marginalia/data.json`;
+	private getMarginaliaFilePath(): string {
+		return `${this.app.vault.configDir}/plugins/marginalia/marginalia.json`;
+	}
+
+	private getEmbeddingFilePath(): string {
+		return `${this.app.vault.configDir}/plugins/marginalia/notes_embedding.json`;
+	}
+
+	public async initializeEmbeddingFile(): Promise<void> {
+		const embeddingPath = this.getEmbeddingFilePath();
+		const exists = await this.app.vault.adapter.exists(embeddingPath);
+		
+		if (!exists) {
+			// Create the file with empty array structure
+			// The file will contain an array of NoteEmbedding objects
+			// Each NoteEmbedding can have multiple chunks (though most notes will have just one)
+			const initialData: NoteEmbedding[] = [];
+			try {
+				await this.app.vault.adapter.write(embeddingPath, JSON.stringify(initialData, null, 2));
+			} catch (error) {
+				console.error('Error creating notes_embedding.json:', error);
+				throw error;
+			}
+		}
+	}
+
+	/**
+	 * Queue a file for embedding processing (with debouncing)
+	 */
+	private queueFileForEmbedding(filePath: string): void {
+		if (!this.settings.embeddingOn) {
+			return;
+		}
+
+		// Clear existing debounce timer for this file
+		const existingTimer = this.embeddingDebounceTimers.get(filePath);
+		if (existingTimer) {
+			clearTimeout(existingTimer);
+		}
+
+		// Add to queue
+		this.embeddingQueue.add(filePath);
+
+		// Set debounce timer (wait 2 seconds after last change before processing)
+		const timer = setTimeout(() => {
+			this.embeddingDebounceTimers.delete(filePath);
+			this.processEmbeddingQueue();
+		}, 2000);
+
+		this.embeddingDebounceTimers.set(filePath, timer);
+	}
+
+	/**
+	 * Process the embedding queue one file at a time
+	 */
+	private async processEmbeddingQueue(): Promise<void> {
+		if (this.isProcessingEmbeddingQueue || this.embeddingQueue.size === 0 || !this.settings.embeddingOn) {
+			return;
+		}
+
+		this.isProcessingEmbeddingQueue = true;
+
+		while (this.embeddingQueue.size > 0 && this.settings.embeddingOn) {
+			// Get the first file from the queue
+			const filePath = this.embeddingQueue.values().next().value;
+			this.embeddingQueue.delete(filePath);
+
+			// Get the file object
+			const file = this.app.vault.getAbstractFileByPath(filePath);
+			if (file instanceof TFile) {
+				try {
+					await this.processFileForEmbedding(file);
+				} catch (error) {
+					console.error(`Error processing file ${filePath} from queue:`, error);
+				}
+			}
+
+			// Small delay between files to avoid overwhelming the server
+			if (this.embeddingQueue.size > 0 && this.settings.embeddingOn) {
+				await new Promise(resolve => setTimeout(resolve, 500));
+			}
+		}
+
+		this.isProcessingEmbeddingQueue = false;
+	}
+
+	/**
+	 * Clear the embedding queue and stop processing
+	 */
+	public clearEmbeddingQueue(): void {
+		this.embeddingQueue.clear();
+		
+		// Clear all debounce timers
+		for (const timer of this.embeddingDebounceTimers.values()) {
+			clearTimeout(timer);
+		}
+		this.embeddingDebounceTimers.clear();
+		
+		// Clear retry counts
+		this.embeddingRetryCount.clear();
+		
+		// Note: We don't reset embeddingListenersRegistered here because
+		// the listeners are still registered, just paused
+	}
+
+	/**
+	 * Start monitoring folders for embedding generation
+	 */
+	public startEmbeddingMonitor(): void {
+		if (!this.settings.embeddingOn) {
+			return;
+		}
+
+		// Prevent duplicate listener registration
+		if (this.embeddingListenersRegistered) {
+			// Listeners already registered, just process files if needed
+			this.processFoldersForEmbedding();
+			return;
+		}
+
+		// Process files immediately
+		this.processFoldersForEmbedding();
+
+		// Register file system events to watch for changes (only once)
+		this.registerEvent(
+			this.app.vault.on('modify', (file: TFile) => {
+				if (this.settings.embeddingOn && file.extension === 'md' && this.isFileInSimilarityFolders(file.path)) {
+					this.queueFileForEmbedding(file.path);
+				}
+			})
+		);
+
+		this.registerEvent(
+			this.app.vault.on('create', (file: TFile) => {
+				if (this.settings.embeddingOn && file.extension === 'md' && this.isFileInSimilarityFolders(file.path)) {
+					this.queueFileForEmbedding(file.path);
+				}
+			})
+		);
+
+		this.embeddingListenersRegistered = true;
+		console.log('Embedding file system listeners registered');
+	}
+
+	/**
+	 * Process all folders specified in settings for embedding
+	 */
+	private async processFoldersForEmbedding(): Promise<void> {
+		if (!this.settings.embeddingOn || !this.settings.similarityFolders) {
+			return;
+		}
+
+		const folders = this.settings.similarityFolders
+			.split(',')
+			.map(f => f.trim())
+			.filter(f => f.length > 0);
+
+		if (folders.length === 0) {
+			return;
+		}
+
+		console.log(`Starting embedding processing for ${folders.length} folder(s): ${folders.join(', ')}`);
+
+		for (let i = 0; i < folders.length; i++) {
+			const folderPath = folders[i];
+			console.log(`Processing folder ${i + 1}/${folders.length}: "${folderPath}"`);
+			await this.processFolderForEmbedding(folderPath);
+		}
+
+		console.log('Initial embedding processing complete');
+	}
+
+	/**
+	 * Process a single folder for embedding
+	 */
+	private async processFolderForEmbedding(folderPath: string): Promise<void> {
+		try {
+			// Try multiple methods to find the folder
+			const normalizedPath = this.normalizePath(folderPath);
+			let folder = this.app.vault.getAbstractFileByPath(folderPath);
+			
+			// If not found with original path, try normalized
+			if (!folder && normalizedPath !== folderPath) {
+				folder = this.app.vault.getAbstractFileByPath(normalizedPath);
+			}
+			
+			// If still not found, try using getAllFolders() to find it
+			if (!folder) {
+				const allFolders = this.app.vault.getAllFolders();
+				// Try exact match first
+				const foundFolder = allFolders.find(f => f.path === folderPath || f.path === normalizedPath);
+				if (foundFolder) {
+					folder = foundFolder;
+				} else {
+					// If still not found, try case-insensitive match
+					const foundFolderCaseInsensitive = allFolders.find(f => 
+						f.path.toLowerCase() === folderPath.toLowerCase() || 
+						f.path.toLowerCase() === normalizedPath.toLowerCase()
+					);
+					if (foundFolderCaseInsensitive) {
+						folder = foundFolderCaseInsensitive;
+					}
+				}
+			}
+			
+			// If folder still not found, try to get files by path prefix instead
+			if (!folder) {
+				console.log(`Folder object not found: "${folderPath}", trying to find files by path prefix...`);
+				const allFiles = this.app.vault.getMarkdownFiles();
+				const normalizedSearchPath = normalizedPath.toLowerCase();
+				const mdFiles = allFiles.filter(file => {
+					const filePath = this.normalizePath(file.path).toLowerCase();
+					return filePath === normalizedSearchPath || filePath.startsWith(normalizedSearchPath + '/');
+				});
+				
+				if (mdFiles.length > 0) {
+					console.log(`Found ${mdFiles.length} markdown file(s) matching folder path: ${folderPath}`);
+					for (const file of mdFiles) {
+						if (!this.settings.embeddingOn) {
+							return;
+						}
+						await this.processFileForEmbedding(file);
+					}
+					console.log(`Completed processing files for folder path: ${folderPath}`);
+					return;
+				} else {
+					console.error(`Folder not found: "${folderPath}" (also tried: "${normalizedPath}")`);
+					console.error(`No files found matching this path prefix.`);
+					// List some available folders for debugging
+					const allFolders = this.app.vault.getAllFolders();
+					if (allFolders.length > 0) {
+						console.error(`Available folders in vault (first 20):`, 
+							allFolders.slice(0, 20).map(f => f.path));
+					}
+					return;
+				}
+			}
+			
+			const actualPath = folder.path;
+			console.log(`Found folder: "${actualPath}" (searched for: "${folderPath}")`);
+
+			// Get all .md files in the folder (recursively)
+			const mdFiles: TFile[] = [];
+			this.collectMarkdownFiles(folder, mdFiles);
+
+			if (mdFiles.length === 0) {
+				console.log(`No markdown files found in folder: ${actualPath}`);
+				return;
+			}
+
+			console.log(`Found ${mdFiles.length} markdown file(s) in folder: ${actualPath}`);
+			console.log(`Processing files in folder: ${actualPath}`);
+
+			for (const file of mdFiles) {
+				// Check if embedding was paused before processing each file
+				if (!this.settings.embeddingOn) {
+					console.log(`Embedding paused, stopping folder processing: ${actualPath}`);
+					return; // Stop processing if embedding was paused
+				}
+				await this.processFileForEmbedding(file);
+			}
+			
+			console.log(`Completed processing folder: ${actualPath}`);
+		} catch (error) {
+			const errorMessage = error instanceof Error ? error.message : String(error);
+			const errorStack = error instanceof Error ? error.stack : undefined;
+			console.error(`Error processing folder "${folderPath}" for embedding: ${errorMessage}`);
+			if (errorStack) {
+				console.error(`Stack trace:`, errorStack);
+			}
+		}
+	}
+
+	/**
+	 * Check if a file path is within one of the specified similarity folders
+	 */
+	private isFileInSimilarityFolders(filePath: string): boolean {
+		if (!this.settings.similarityFolders) {
+			return false;
+		}
+
+		const folders = this.settings.similarityFolders
+			.split(',')
+			.map(f => f.trim())
+			.filter(f => f.length > 0);
+
+		for (const folderPath of folders) {
+			// Check if file path starts with the folder path (handles both exact match and subfolders)
+			if (filePath === folderPath || filePath.startsWith(folderPath + '/')) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * Recursively collect all .md files from a folder
+	 */
+	private collectMarkdownFiles(folder: any, mdFiles: TFile[]): void {
+		if (folder instanceof TFile && folder.extension === 'md') {
+			mdFiles.push(folder);
+		} else if (folder.children) {
+			for (const child of folder.children) {
+				this.collectMarkdownFiles(child, mdFiles);
+			}
+		}
+	}
+
+	/**
+	 * Process a single file for embedding
+	 */
+	private async processFileForEmbedding(file: TFile): Promise<void> {
+		if (!this.settings.embeddingOn || !this.settings.ollamaAvailable) {
+			return;
+		}
+
+		try {
+			// Load existing embeddings
+			const embeddings = await this.loadEmbeddings();
+			
+			// Check if file needs processing
+			const filePath = this.normalizePath(file.path);
+			const fileStat = await this.app.vault.adapter.stat(file.path);
+			if (!fileStat) {
+				return;
+			}
+
+			const existingEmbedding = embeddings.find(e => this.normalizePath(e.source_path) === filePath);
+			const needsProcessing = !existingEmbedding || 
+				new Date(fileStat.mtime) > new Date(existingEmbedding.noteEdited);
+
+			if (!needsProcessing) {
+				return; // File is up to date
+			}
+
+			// Read file content
+			const content = await this.app.vault.read(file);
+			
+			// Clean content (remove frontmatter, links, etc.)
+			const cleanedContent = this.cleanMarkdownForEmbedding(content);
+			
+			if (cleanedContent.length === 0) {
+				return; // No meaningful content
+			}
+
+			// Check if embedding was paused before chunking
+			if (!this.settings.embeddingOn) {
+				return; // Stop processing if embedding was paused
+			}
+
+			// Check if file needs chunking (>7000 characters)
+			let chunks: Array<{ char_start: number; char_end: number }> = [];
+			
+			if (cleanedContent.length > 7000) {
+				console.log(`Note longer than 7000 characters found: ${filePath} (${cleanedContent.length} characters)`);
+				// Check again before sending qwen2.5:3b-instruct query
+				if (!this.settings.embeddingOn) {
+					return; // Stop if embedding was paused
+				}
+				// Use qwen2.5:3b-instruct to chunk the file
+				try {
+					chunks = await this.chunkFileWithQwen(cleanedContent, filePath);
+					console.log(`File ${filePath} chunked into ${chunks.length} chunks:`, chunks);
+					// Reset retry count on success
+					this.embeddingRetryCount.delete(filePath);
+				} catch (chunkingError) {
+					// Chunking failed - check retry count
+					const retryCount = this.embeddingRetryCount.get(filePath) || 0;
+					const errorMessage = chunkingError instanceof Error ? chunkingError.message : String(chunkingError);
+					
+					if (retryCount < this.MAX_RETRIES) {
+						console.error(`Chunking failed for ${filePath} (attempt ${retryCount + 1}/${this.MAX_RETRIES}): ${errorMessage}`);
+						console.log(`Will retry in ${5000 * (retryCount + 1)}ms`);
+						this.embeddingRetryCount.set(filePath, retryCount + 1);
+						// Re-queue the file for retry after a delay
+						setTimeout(() => {
+							this.queueFileForEmbedding(file.path);
+						}, 5000 * (retryCount + 1)); // Exponential backoff: 5s, 10s, 15s
+						return; // Exit without processing
+					} else {
+						console.error(`Chunking failed for ${filePath} after ${this.MAX_RETRIES} retries. Error: ${errorMessage}`);
+						console.error(`Skipping file. It will be retried on next Obsidian restart (retry counts are per-session only).`);
+						this.embeddingRetryCount.delete(filePath);
+						throw chunkingError; // Re-throw to be caught by outer try-catch
+					}
+				}
+			} else {
+				// Single chunk - entire file
+				chunks = [{ char_start: 0, char_end: cleanedContent.length }];
+			}
+
+			// Check if embedding was paused before generating embeddings
+			if (!this.settings.embeddingOn) {
+				return; // Stop processing if embedding was paused
+			}
+
+			// Generate embeddings for each chunk
+			const embeddingChunks: NoteEmbeddingChunk[] = [];
+			for (let i = 0; i < chunks.length; i++) {
+				const chunk = chunks[i];
+				// Check if embedding was paused before processing each chunk
+				if (!this.settings.embeddingOn) {
+					return; // Stop processing if embedding was paused (current chunk can complete, but no new chunks)
+				}
+				const chunkText = cleanedContent.substring(chunk.char_start, chunk.char_end);
+				
+				try {
+					const embedding = await this.generateEmbeddingForText(chunkText);
+					
+					// Check again after embedding generation (in case it was paused during the async call)
+					if (!this.settings.embeddingOn) {
+						return; // Stop if embedding was paused during processing
+					}
+					
+					if (embedding) {
+						embeddingChunks.push({
+							chunk_id: this.generateUUID(),
+							char_start: chunk.char_start,
+							char_end: chunk.char_end,
+							vector: embedding
+						});
+					} else {
+						console.error(`Failed to generate embedding for chunk ${i + 1}/${chunks.length} of ${filePath} (characters ${chunk.char_start}-${chunk.char_end}). Embedding returned null.`);
+					}
+				} catch (embeddingError) {
+					const errorMessage = embeddingError instanceof Error ? embeddingError.message : String(embeddingError);
+					console.error(`Error generating embedding for chunk ${i + 1}/${chunks.length} of ${filePath} (characters ${chunk.char_start}-${chunk.char_end}): ${errorMessage}`);
+					// Continue with other chunks even if one fails
+				}
+			}
+
+			if (embeddingChunks.length === 0) {
+				console.error(`Failed to generate any embeddings for ${filePath}. All ${chunks.length} chunk(s) failed.`);
+				return; // No embeddings generated
+			}
+
+			if (embeddingChunks.length < chunks.length) {
+				console.warn(`Partially embedded ${filePath}: ${embeddingChunks.length}/${chunks.length} chunk(s) succeeded.`);
+			}
+
+			// Update or create embedding entry
+			const embeddingId = existingEmbedding?.embedding_id || this.generateUUID();
+			const newEmbedding: NoteEmbedding = {
+				embedding_id: embeddingId,
+				source_path: filePath,
+				noteEdited: new Date(fileStat.mtime).toISOString(),
+				chunks: embeddingChunks
+			};
+
+			// Remove old entry if exists (compare normalized paths)
+			const updatedEmbeddings = embeddings.filter(e => this.normalizePath(e.source_path) !== filePath);
+			updatedEmbeddings.push(newEmbedding);
+
+			// Save embeddings
+			await this.saveEmbeddings(updatedEmbeddings);
+			
+			// Clear retry count on successful embedding
+			this.embeddingRetryCount.delete(filePath);
+			
+			// Log successful embedding
+			console.log(`✓ Successfully embedded note: ${filePath} (${embeddingChunks.length} chunk${embeddingChunks.length !== 1 ? 's' : ''})`);
+			
+			// Trigger embedding progress update callback if registered
+			// Use setTimeout to ensure the callback runs after the file system write completes
+			if (this.embeddingProgressCallback) {
+				setTimeout(() => {
+					if (this.embeddingProgressCallback) {
+						this.embeddingProgressCallback();
+					}
+				}, 200);
+			}
+		} catch (error) {
+			const errorMessage = error instanceof Error ? error.message : String(error);
+			const errorStack = error instanceof Error ? error.stack : undefined;
+			console.error(`Failed to process file ${file.path} for embedding. Error: ${errorMessage}`);
+			if (errorStack) {
+				console.error(`Stack trace:`, errorStack);
+			}
+			// Note: Retry counts are per-session only. File will be retried on next Obsidian restart.
+		}
+	}
+
+	/**
+	 * Clean markdown content for embedding (remove frontmatter, links, etc.)
+	 */
+	private cleanMarkdownForEmbedding(content: string): string {
+		let cleaned = content;
+
+		// Remove frontmatter
+		const frontmatterRegex = /^---\s*\n[\s\S]*?\n---\s*\n/;
+		cleaned = cleaned.replace(frontmatterRegex, '');
+
+		// Remove markdown links but keep the text: [text](url) -> text
+		cleaned = cleaned.replace(/\[([^\]]+)\]\([^\)]+\)/g, '$1');
+
+		// Remove image links: ![alt](url) -> alt
+		cleaned = cleaned.replace(/!\[([^\]]*)\]\([^\)]+\)/g, '$1');
+
+		// Remove reference-style links: [text][ref] -> text
+		cleaned = cleaned.replace(/\[([^\]]+)\]\[[^\]]+\]/g, '$1');
+
+		// Remove HTML tags but keep text content
+		cleaned = cleaned.replace(/<[^>]+>/g, '');
+
+		// Remove markdown code blocks but keep content
+		cleaned = cleaned.replace(/```[\s\S]*?```/g, '');
+		cleaned = cleaned.replace(/`[^`]+`/g, '');
+
+		// Remove markdown headers but keep text
+		cleaned = cleaned.replace(/^#{1,6}\s+/gm, '');
+
+		// Remove markdown emphasis but keep text
+		cleaned = cleaned.replace(/\*\*([^\*]+)\*\*/g, '$1');
+		cleaned = cleaned.replace(/\*([^\*]+)\*/g, '$1');
+		cleaned = cleaned.replace(/__([^_]+)__/g, '$1');
+		cleaned = cleaned.replace(/_([^_]+)_/g, '$1');
+
+		// Remove markdown lists markers
+		cleaned = cleaned.replace(/^[\s]*[-*+]\s+/gm, '');
+		cleaned = cleaned.replace(/^[\s]*\d+\.\s+/gm, '');
+
+		// Clean up extra whitespace
+		cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
+		cleaned = cleaned.trim();
+
+		return cleaned;
+	}
+
+	/**
+	 * Validate chunks to ensure they're within bounds (but allow gaps)
+	 * Gaps are acceptable as they may represent discarded metadata, links, etc.
+	 */
+	private validateChunks(chunks: Array<{ char_start: number; char_end: number }>, contentLength: number): Array<{ char_start: number; char_end: number }> {
+		if (!chunks || chunks.length === 0) {
+			return [];
+		}
+
+		// Validate and clamp chunks to content bounds, but preserve gaps
+		const validated: Array<{ char_start: number; char_end: number }> = [];
+
+		for (const chunk of chunks) {
+			const start = Math.max(0, Math.min(chunk.char_start, contentLength));
+			const end = Math.max(start, Math.min(chunk.char_end, contentLength));
+			
+			// Only add chunk if it has valid range
+			if (start < end && start < contentLength) {
+				validated.push({
+					char_start: start,
+					char_end: end
+				});
+			}
+		}
+
+		return validated;
+	}
+
+	/**
+	 * Use qwen2.5:3b-instruct to chunk a long file into semantic chunks
+	 */
+	private async chunkFileWithQwen(content: string, filePath?: string): Promise<Array<{ char_start: number; char_end: number }>> {
+		const address = this.settings.ollamaAddress || 'localhost';
+		const port = this.settings.ollamaPort || '11434';
+		const baseUrl = `http://${address}:${port}`;
+
+		const prompt = `You are a text chunking assistant. Divide the text below into chunks by providing character position ranges.
+
+YOUR TASK: Read the text and determine where to split it. Return a JSON array where each element is an object with "char_start" and "char_end" properties showing the character positions of each chunk.
+
+IMPORTANT: You are NOT extracting concepts, topics, keywords, or any other content. You are ONLY providing character position numbers that indicate where chunks begin and end in the original text.
+
+REQUIREMENTS:
+- Each chunk must be less than 7000 characters
+- Make chunks as close to 7000 characters as possible while maintaining semantic boundaries
+- You may skip irrelevant content like metadata, links, or other non-semantic text
+- Chunks do not need to be contiguous - gaps are acceptable
+- Return ONLY a JSON array - no explanations, no text before or after, no markdown code blocks
+
+REQUIRED OUTPUT FORMAT:
+[{"char_start": 0, "char_end": 5000}, {"char_start": 5200, "char_end": 10000}]
+
+Each object must have:
+- "char_start": a number (starting character position)
+- "char_end": a number (ending character position)
+
+Text to chunk (total length: ${content.length} characters):
+${content}
+
+Output ONLY the JSON array with char_start and char_end objects.`;
+
+		console.log(`Sending qwen2.5:3b-instruct query for chunking${filePath ? ` (file: ${filePath})` : ''} (${content.length} characters)`);
+
+		const controller = new AbortController();
+		// Use longer timeout for chunking as large files can take time to analyze
+		// Calculate timeout based on file size: base 60s + 1s per 1000 characters (max 180s)
+		const timeoutMs = Math.min(60000 + Math.floor(content.length / 1000) * 1000, 180000);
+		const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+		const timeoutSeconds = Math.floor(timeoutMs / 1000);
+
+		try {
+			const response = await fetch(`${baseUrl}/api/generate`, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json'
+				},
+				body: JSON.stringify({
+					model: 'qwen2.5:3b-instruct',
+					prompt: prompt,
+					stream: false
+				}),
+				signal: controller.signal
+			});
+
+			clearTimeout(timeoutId);
+
+			if (!response.ok) {
+				const errorText = await response.text();
+				console.error(`qwen2.5:3b-instruct chunking query failed with status ${response.status}:`, errorText);
+				throw new Error(`qwen2.5:3b-instruct API returned status ${response.status}: ${errorText}`);
+			}
+
+			const data = await response.json();
+			const responseText = data.response || '';
+			
+			console.log(`qwen2.5:3b-instruct chunking response received (${responseText.length} characters):`, responseText.substring(0, 500) + (responseText.length > 500 ? '...' : ''));
+			
+			// Try to extract JSON from the response
+			// First, try to find JSON array in the response (may be wrapped in text)
+			let jsonMatch = responseText.match(/\[[\s\S]*\]/);
+			
+			// If no match, try to find JSON code blocks
+			if (!jsonMatch) {
+				const codeBlockMatch = responseText.match(/```(?:json)?\s*(\[[\s\S]*?\])\s*```/);
+				if (codeBlockMatch) {
+					jsonMatch = [codeBlockMatch[1]];
+				}
+			}
+			
+			if (jsonMatch) {
+				try {
+					const chunks = JSON.parse(jsonMatch[0]);
+					if (Array.isArray(chunks) && chunks.every(c => c.char_start !== undefined && c.char_end !== undefined)) {
+						console.log(`qwen2.5:3b-instruct returned valid chunks:`, chunks);
+						// Validate chunks are within bounds (but don't force them to be contiguous)
+						// Gaps are acceptable as they may represent discarded metadata, links, etc.
+						return this.validateChunks(chunks, content.length);
+					} else {
+						console.error('qwen2.5:3b-instruct returned chunks but they do not match expected format:', chunks);
+					}
+				} catch (parseError) {
+					console.error('Error parsing JSON from qwen2.5:3b-instruct response:', parseError);
+					console.error('JSON match was:', jsonMatch[0]);
+				}
+			} else {
+				console.error('qwen2.5:3b-instruct response does not contain a JSON array. Full response:', responseText);
+			}
+		} catch (error) {
+			clearTimeout(timeoutId);
+			if (error instanceof Error && error.name === 'AbortError') {
+				throw new Error(`qwen2.5:3b-instruct chunking request timeout (${timeoutSeconds}s)`);
+			} else {
+				throw error;
+			}
+		}
+
+		// If we get here, chunking failed - throw error to trigger retry
+		throw new Error('qwen2.5:3b-instruct failed to return valid chunks. File will be retried.');
+	}
+
+	/**
+	 * Generate embedding for text using nomic
+	 */
+	private async generateEmbeddingForText(text: string): Promise<number[] | null> {
+		if (!this.settings.ollamaAvailable || !text || text.trim().length === 0) {
+			return null;
+		}
+
+		const address = this.settings.ollamaAddress || 'localhost';
+		const port = this.settings.ollamaPort || '11434';
+		const baseUrl = `http://${address}:${port}`;
+
+		const controller = new AbortController();
+		const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+
+		try {
+			const response = await fetch(`${baseUrl}/api/embeddings`, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json'
+				},
+				body: JSON.stringify({
+					model: 'nomic-embed-text:latest',
+					prompt: text
+				}),
+				signal: controller.signal
+			});
+
+			clearTimeout(timeoutId);
+
+			if (response.ok) {
+				const data = await response.json();
+				if (data.embedding && Array.isArray(data.embedding) && data.embedding.length > 0) {
+					return data.embedding;
+				}
+			}
+		} catch (error) {
+			clearTimeout(timeoutId);
+			if (error instanceof Error && error.name === 'AbortError') {
+				console.error('Error generating embedding: Request timeout (30s)');
+			} else {
+				console.error('Error generating embedding:', error);
+			}
+		}
+
+		return null;
+	}
+
+	/**
+	 * Load embeddings from JSON file
+	 */
+	private async loadEmbeddings(): Promise<NoteEmbedding[]> {
+		const embeddingPath = this.getEmbeddingFilePath();
+		try {
+			const exists = await this.app.vault.adapter.exists(embeddingPath);
+			if (!exists) {
+				return [];
+			}
+
+			const content = await this.app.vault.adapter.read(embeddingPath);
+			if (!content) {
+				return [];
+			}
+
+			const embeddings = JSON.parse(content);
+			return Array.isArray(embeddings) ? embeddings : [];
+		} catch (error) {
+			console.error('Error loading embeddings:', error);
+			return [];
+		}
+	}
+
+	/**
+	 * Save embeddings to JSON file
+	 */
+	private async saveEmbeddings(embeddings: NoteEmbedding[]): Promise<void> {
+		const embeddingPath = this.getEmbeddingFilePath();
+		try {
+			await this.app.vault.adapter.write(embeddingPath, JSON.stringify(embeddings, null, 2));
+		} catch (error) {
+			console.error('Error saving embeddings:', error);
+			throw error;
+		}
+	}
+
+
+	/**
+	 * Generate a UUID
+	 */
+	private generateUUID(): string {
+		return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+			const r = Math.random() * 16 | 0;
+			const v = c === 'x' ? r : (r & 0x3 | 0x8);
+			return v.toString(16);
+		});
+	}
+
+	/**
+	 * Normalize file path for comparison (remove leading/trailing slashes, ensure consistency)
+	 */
+	private normalizePath(path: string): string {
+		return path.replace(/^\/+|\/+$/g, ''); // Remove leading and trailing slashes
+	}
+
+	/**
+	 * Calculate embedding progress
+	 */
+	public async getEmbeddingProgress(): Promise<{ total: number; embedded: number; percentage: number }> {
+		if (!this.settings.similarityFolders) {
+			return { total: 0, embedded: 0, percentage: 0 };
+		}
+
+		const folders = this.settings.similarityFolders
+			.split(',')
+			.map(f => f.trim())
+			.filter(f => f.length > 0);
+
+		// Collect all .md files in target folders
+		const mdFiles: TFile[] = [];
+		for (const folderPath of folders) {
+			// Try both original and normalized path
+			let folder = this.app.vault.getAbstractFileByPath(folderPath);
+			if (!folder) {
+				const normalizedPath = this.normalizePath(folderPath);
+				if (normalizedPath !== folderPath) {
+					folder = this.app.vault.getAbstractFileByPath(normalizedPath);
+				}
+			}
+			if (folder) {
+				this.collectMarkdownFiles(folder, mdFiles);
+			} else {
+				console.warn(`Folder not found in getEmbeddingProgress: "${folderPath}"`);
+			}
+		}
+
+		const total = mdFiles.length;
+
+		// Load embeddings and count embedded files
+		const embeddings = await this.loadEmbeddings();
+		// Normalize paths for comparison
+		const embeddedPaths = new Set(embeddings.map(e => this.normalizePath(e.source_path)));
+		const embedded = mdFiles.filter(f => embeddedPaths.has(this.normalizePath(f.path))).length;
+
+		const percentage = total > 0 ? Math.round((embedded / total) * 100) : 0;
+
+		return { total, embedded, percentage };
 	}
 
 	private async loadMarginaliaData() {
 		try {
-			const dataPath = this.getDataFilePath();
+			const dataPath = this.getMarginaliaFilePath();
 			const exists = await this.app.vault.adapter.exists(dataPath);
 			if (exists) {
 				const dataFile = await this.app.vault.adapter.read(dataPath);
@@ -714,7 +1662,7 @@ export default class MarginaliaPlugin extends Plugin {
 		}
 		
 		const dataStr = JSON.stringify(data, null, 2);
-		const dataPath = this.getDataFilePath();
+		const dataPath = this.getMarginaliaFilePath();
 		
 		try {
 			// Ensure directory exists
@@ -739,13 +1687,20 @@ export default class MarginaliaPlugin extends Plugin {
 		const port = this.settings.ollamaPort || '11434';
 		const baseUrl = `http://${address}:${port}`;
 
+		// Set up timeout (10 seconds)
+		const controller = new AbortController();
+		const timeoutId = setTimeout(() => controller.abort(), 10000);
+
 		try {
 			const response = await fetch(`${baseUrl}/api/tags`, {
 				method: 'GET',
 				headers: {
 					'Content-Type': 'application/json'
-				}
+				},
+				signal: controller.signal
 			});
+			
+			clearTimeout(timeoutId);
 
 			if (response.ok) {
 				const data = await response.json();
@@ -753,24 +1708,43 @@ export default class MarginaliaPlugin extends Plugin {
 				const modelNames = models.map((m: any) => m.name || m.model || '');
 
 				// Check for required models
-				const requiredModels = ['nomic-embed-text:latest', 'phi3:latest'];
-				let allModelsAvailable = true;
+				let nomicAvailable = false;
+				let qwenAvailable = false;
 
-				for (const requiredModel of requiredModels) {
-					const found = modelNames.some((name: string) => 
-						name === requiredModel || name.startsWith(requiredModel.split(':')[0])
-					);
-					if (!found) {
-						allModelsAvailable = false;
-						break;
-					}
+				// Check for nomic-embed-text
+				const nomicFound = modelNames.some((name: string) => 
+					name === 'nomic-embed-text:latest' || name.startsWith('nomic-embed-text')
+				);
+				if (nomicFound) {
+					nomicAvailable = true;
 				}
 
-				this.settings.ollamaAvailable = allModelsAvailable;
+				// Check for qwen2.5:3b-instruct
+				const qwenFound = modelNames.some((name: string) => 
+					name === 'qwen2.5:3b-instruct' || name.startsWith('qwen2.5:3b-instruct') || name.startsWith('qwen2.5')
+				);
+				if (qwenFound) {
+					qwenAvailable = true;
+				}
+
+				// Update individual statuses
+				this.settings.ollamaServerStatus = 'available';
+				this.settings.nomicModelStatus = nomicAvailable ? 'available' : 'unavailable';
+				this.settings.qwenModelStatus = qwenAvailable ? 'available' : 'unavailable';
+				
+				// Update overall availability (only true if server is reachable AND both models are available)
+				this.settings.ollamaAvailable = nomicAvailable && qwenAvailable;
 			} else {
+				this.settings.ollamaServerStatus = 'unavailable';
+				this.settings.nomicModelStatus = 'unknown';
+				this.settings.qwenModelStatus = 'unknown';
 				this.settings.ollamaAvailable = false;
 			}
-		} catch (error) {
+		} catch (error: any) {
+			clearTimeout(timeoutId);
+			this.settings.ollamaServerStatus = 'unavailable';
+			this.settings.nomicModelStatus = 'unknown';
+			this.settings.qwenModelStatus = 'unknown';
 			this.settings.ollamaAvailable = false;
 		}
 
@@ -786,7 +1760,7 @@ export default class MarginaliaPlugin extends Plugin {
 	}
 
 	/**
-	 * Summarize long text using Phi3 to fit within token limit
+	 * Summarize long text using qwen2.5:3b-instruct to fit within token limit
 	 */
 	private async summarizeText(text: string): Promise<string> {
 		if (!this.settings.ollamaAvailable) {
@@ -807,7 +1781,7 @@ export default class MarginaliaPlugin extends Plugin {
 					'Content-Type': 'application/json'
 				},
 				body: JSON.stringify({
-					model: 'phi3:latest',
+					model: 'qwen2.5:3b-instruct',
 					prompt: prompt,
 					stream: false
 				})
@@ -821,7 +1795,7 @@ export default class MarginaliaPlugin extends Plugin {
 				return text;
 			}
 		} catch (error) {
-			console.error('Error calling Phi3 for summarization:', error);
+			console.error('Error calling qwen2.5:3b-instruct for summarization:', error);
 			return text;
 		}
 	}
@@ -839,6 +1813,8 @@ export default class MarginaliaPlugin extends Plugin {
 		const address = this.settings.ollamaAddress || 'localhost';
 		const port = this.settings.ollamaPort || '11434';
 		const baseUrl = `http://${address}:${port}`;
+
+		let timeoutId: NodeJS.Timeout | null = null;
 
 		try {
 			// Use the note text for embedding
@@ -859,6 +1835,9 @@ export default class MarginaliaPlugin extends Plugin {
 
 			// Generate embedding using nomic-embed-text
 			// Ollama embeddings API uses "prompt" parameter
+			const controller = new AbortController();
+			timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+
 			const response = await fetch(`${baseUrl}/api/embeddings`, {
 				method: 'POST',
 				headers: {
@@ -867,8 +1846,11 @@ export default class MarginaliaPlugin extends Plugin {
 				body: JSON.stringify({
 					model: 'nomic-embed-text:latest',
 					prompt: finalText
-				})
+				}),
+				signal: controller.signal
 			});
+
+			clearTimeout(timeoutId);
 
 			if (response.ok) {
 				const data = await response.json();
@@ -883,7 +1865,12 @@ export default class MarginaliaPlugin extends Plugin {
 				console.error('Error generating embedding:', response.status, errorText);
 			}
 		} catch (error) {
-			console.error('Error calling nomic-embed-text:', error);
+			if (timeoutId) clearTimeout(timeoutId);
+			if (error instanceof Error && error.name === 'AbortError') {
+				console.error('Error calling nomic-embed-text: Request timeout (30s)');
+			} else {
+				console.error('Error calling nomic-embed-text:', error);
+			}
 		}
 	}
 
@@ -900,6 +1887,8 @@ export default class MarginaliaPlugin extends Plugin {
 		const address = this.settings.ollamaAddress || 'localhost';
 		const port = this.settings.ollamaPort || '11434';
 		const baseUrl = `http://${address}:${port}`;
+
+		let timeoutId: NodeJS.Timeout | null = null;
 
 		try {
 			// Use the selection text for embedding
@@ -919,6 +1908,9 @@ export default class MarginaliaPlugin extends Plugin {
 			}
 
 			// Generate embedding using nomic-embed-text
+			const controller = new AbortController();
+			timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+
 			const response = await fetch(`${baseUrl}/api/embeddings`, {
 				method: 'POST',
 				headers: {
@@ -927,8 +1919,11 @@ export default class MarginaliaPlugin extends Plugin {
 				body: JSON.stringify({
 					model: 'nomic-embed-text:latest',
 					prompt: finalText
-				})
+				}),
+				signal: controller.signal
 			});
+
+			clearTimeout(timeoutId);
 
 			if (response.ok) {
 				const data = await response.json();
@@ -943,7 +1938,12 @@ export default class MarginaliaPlugin extends Plugin {
 				console.error('Error generating selection embedding:', response.status, errorText);
 			}
 		} catch (error) {
-			console.error('Error calling nomic-embed-text for selection:', error);
+			if (timeoutId) clearTimeout(timeoutId);
+			if (error instanceof Error && error.name === 'AbortError') {
+				console.error('Error calling nomic-embed-text for selection: Request timeout (30s)');
+			} else {
+				console.error('Error calling nomic-embed-text for selection:', error);
+			}
 		}
 	}
 
@@ -1164,6 +2164,8 @@ export default class MarginaliaPlugin extends Plugin {
 		const port = this.settings.ollamaPort || '11434';
 		const baseUrl = `http://${address}:${port}`;
 
+		let timeoutId: NodeJS.Timeout | null = null;
+
 		try {
 			// Check if text is too long (>2048 tokens)
 			let finalText = combinedText;
@@ -1174,6 +2176,9 @@ export default class MarginaliaPlugin extends Plugin {
 			}
 
 			// Generate embedding using nomic-embed-text
+			const controller = new AbortController();
+			timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+
 			const response = await fetch(`${baseUrl}/api/embeddings`, {
 				method: 'POST',
 				headers: {
@@ -1182,8 +2187,11 @@ export default class MarginaliaPlugin extends Plugin {
 				body: JSON.stringify({
 					model: 'nomic-embed-text:latest',
 					prompt: finalText
-				})
+				}),
+				signal: controller.signal
 			});
+
+			clearTimeout(timeoutId);
 
 			if (response.ok) {
 				const data = await response.json();
@@ -1192,7 +2200,12 @@ export default class MarginaliaPlugin extends Plugin {
 				}
 			}
 		} catch (error) {
-			console.error('Error generating combined embedding:', error);
+			if (timeoutId) clearTimeout(timeoutId);
+			if (error instanceof Error && error.name === 'AbortError') {
+				console.error('Error generating combined embedding: Request timeout (30s)');
+			} else {
+				console.error('Error generating combined embedding:', error);
+			}
 		}
 
 		return null;
@@ -1262,6 +2275,159 @@ export default class MarginaliaPlugin extends Plugin {
 		return results;
 	}
 
+	/**
+	 * Find notes similar to marginalia by comparing marginalia embedding to note chunk embeddings
+	 */
+	public async findNotesSimilarToMarginalia(item: MarginaliaItem, filePath: string, threshold: number = 0.7): Promise<Array<{ filePath: string; similarity: number }>> {
+		if (!item.embedding || item.embedding === null || !Array.isArray(item.embedding) || item.embedding.length === 0) {
+			throw new Error('Item does not have a note embedding');
+		}
+
+		const noteEmbeddings = await this.loadEmbeddings();
+		const results: Map<string, number> = new Map(); // Map of filePath -> best similarity
+		const normalizedCurrentPath = this.normalizePath(filePath);
+
+		for (const noteEmbedding of noteEmbeddings) {
+			// Skip the current file if it's the same as the item's file
+			if (this.normalizePath(noteEmbedding.source_path) === normalizedCurrentPath) {
+				continue;
+			}
+
+			// Compare to each chunk in the note and find the best match
+			let bestSimilarity = 0;
+			for (const chunk of noteEmbedding.chunks) {
+				if (chunk.vector && Array.isArray(chunk.vector) && chunk.vector.length > 0) {
+					const similarity = this.cosineSimilarity(item.embedding, chunk.vector);
+					if (similarity > bestSimilarity) {
+						bestSimilarity = similarity;
+					}
+				}
+			}
+
+			// Add if above threshold
+			if (bestSimilarity >= threshold) {
+				const existingSimilarity = results.get(noteEmbedding.source_path);
+				if (!existingSimilarity || bestSimilarity > existingSimilarity) {
+					results.set(noteEmbedding.source_path, bestSimilarity);
+				}
+			}
+		}
+
+		// Convert to array and sort
+		const resultArray: Array<{ filePath: string; similarity: number }> = [];
+		for (const [filePath, similarity] of results.entries()) {
+			resultArray.push({ filePath, similarity });
+		}
+
+		resultArray.sort((a, b) => b.similarity - a.similarity);
+		return resultArray;
+	}
+
+	/**
+	 * Find notes similar to selection by comparing selection embedding to note chunk embeddings
+	 */
+	public async findNotesSimilarToSelection(item: MarginaliaItem, filePath: string, threshold: number = 0.5): Promise<Array<{ filePath: string; similarity: number }>> {
+		if (!item.selectionEmbedding || item.selectionEmbedding === null || !Array.isArray(item.selectionEmbedding) || item.selectionEmbedding.length === 0) {
+			throw new Error('Item does not have a selection embedding');
+		}
+
+		const noteEmbeddings = await this.loadEmbeddings();
+		const results: Map<string, number> = new Map(); // Map of filePath -> best similarity
+		const normalizedCurrentPath = this.normalizePath(filePath);
+
+		for (const noteEmbedding of noteEmbeddings) {
+			// Skip the current file if it's the same as the item's file
+			if (this.normalizePath(noteEmbedding.source_path) === normalizedCurrentPath) {
+				continue;
+			}
+
+			// Compare to each chunk in the note and find the best match
+			let bestSimilarity = 0;
+			for (const chunk of noteEmbedding.chunks) {
+				if (chunk.vector && Array.isArray(chunk.vector) && chunk.vector.length > 0) {
+					const similarity = this.cosineSimilarity(item.selectionEmbedding, chunk.vector);
+					if (similarity > bestSimilarity) {
+						bestSimilarity = similarity;
+					}
+				}
+			}
+
+			// Add if above threshold
+			if (bestSimilarity >= threshold) {
+				const existingSimilarity = results.get(noteEmbedding.source_path);
+				if (!existingSimilarity || bestSimilarity > existingSimilarity) {
+					results.set(noteEmbedding.source_path, bestSimilarity);
+				}
+			}
+		}
+
+		// Convert to array and sort
+		const resultArray: Array<{ filePath: string; similarity: number }> = [];
+		for (const [filePath, similarity] of results.entries()) {
+			resultArray.push({ filePath, similarity });
+		}
+
+		resultArray.sort((a, b) => b.similarity - a.similarity);
+		return resultArray;
+	}
+
+	/**
+	 * Find notes similar to combined (selection + marginalia) by comparing combined embedding to note chunk embeddings
+	 */
+	public async findNotesSimilarToCombined(item: MarginaliaItem, filePath: string, threshold: number = 0.5): Promise<Array<{ filePath: string; similarity: number }>> {
+		// Generate combined embedding for the current item
+		const noteText = item.note || '';
+		const selectionText = item.text || '';
+		
+		if (!this.hasMeaningfulText(noteText) && !this.hasMeaningfulText(selectionText)) {
+			throw new Error('Item needs at least a note or selection text to generate combined embedding');
+		}
+
+		const sourceEmbedding = await this.generateCombinedEmbedding(noteText, selectionText);
+		if (!sourceEmbedding || sourceEmbedding.length === 0) {
+			throw new Error('Failed to generate combined embedding');
+		}
+
+		const noteEmbeddings = await this.loadEmbeddings();
+		const results: Map<string, number> = new Map(); // Map of filePath -> best similarity
+		const normalizedCurrentPath = this.normalizePath(filePath);
+
+		for (const noteEmbedding of noteEmbeddings) {
+			// Skip the current file if it's the same as the item's file
+			if (this.normalizePath(noteEmbedding.source_path) === normalizedCurrentPath) {
+				continue;
+			}
+
+			// Compare to each chunk in the note and find the best match
+			let bestSimilarity = 0;
+			for (const chunk of noteEmbedding.chunks) {
+				if (chunk.vector && Array.isArray(chunk.vector) && chunk.vector.length > 0) {
+					const similarity = this.cosineSimilarity(sourceEmbedding, chunk.vector);
+					if (similarity > bestSimilarity) {
+						bestSimilarity = similarity;
+					}
+				}
+			}
+
+			// Add if above threshold
+			if (bestSimilarity >= threshold) {
+				const existingSimilarity = results.get(noteEmbedding.source_path);
+				if (!existingSimilarity || bestSimilarity > existingSimilarity) {
+					results.set(noteEmbedding.source_path, bestSimilarity);
+				}
+			}
+		}
+
+		// Convert to array and sort
+		const resultArray: Array<{ filePath: string; similarity: number }> = [];
+		for (const [filePath, similarity] of results.entries()) {
+			resultArray.push({ filePath, similarity });
+		}
+
+		resultArray.sort((a, b) => b.similarity - a.similarity);
+		return resultArray;
+	}
+
 	public getSidebarView(): MarginaliaView | null {
 		return this.sidebarView;
 	}
@@ -1324,11 +2490,13 @@ export default class MarginaliaPlugin extends Plugin {
 class MarginNoteModal extends Modal {
 	private onSubmit: (note: string, color?: string) => void;
 	private defaultColor: string;
+	private selectedText: string;
 
-	constructor(app: any, defaultColor: string, onSubmit: (note: string, color?: string) => void) {
+	constructor(app: any, defaultColor: string, onSubmit: (note: string, color?: string) => void, selectedText?: string) {
 		super(app);
 		this.onSubmit = onSubmit;
 		this.defaultColor = defaultColor;
+		this.selectedText = selectedText || '';
 	}
 
 	onOpen() {
@@ -1337,14 +2505,65 @@ class MarginNoteModal extends Modal {
 
 		contentEl.createEl('h2', { text: 'Add marginalia' });
 
+		// Show selected text preview if available
+		if (this.selectedText) {
+			const textPreview = contentEl.createDiv();
+			textPreview.style.marginBottom = '15px';
+			textPreview.style.padding = '10px';
+			textPreview.style.backgroundColor = 'var(--background-secondary)';
+			textPreview.style.borderRadius = '4px';
+			textPreview.style.maxHeight = '20em'; // Max 20 lines high (approximately 1em per line)
+			textPreview.style.overflowY = 'auto';
+			textPreview.style.whiteSpace = 'pre-wrap';
+			textPreview.style.height = 'auto';
+			textPreview.createEl('p', { 
+				text: `Selected text: "${this.selectedText}"`,
+				attr: { style: 'margin: 0; font-size: 0.9em; color: var(--text-muted);' }
+			});
+		}
+
 		const input = contentEl.createEl('textarea', {
 			attr: {
 				placeholder: 'Enter your margin note...',
-				rows: '5'
+				rows: '5',
+				maxlength: '7000'
 			}
 		});
 		input.style.width = '100%';
 		input.style.minHeight = '100px';
+
+		// Character counter
+		const charCounter = contentEl.createDiv();
+		charCounter.style.marginTop = '5px';
+		charCounter.style.fontSize = '0.85em';
+		charCounter.style.color = 'var(--text-muted)';
+		charCounter.style.textAlign = 'right';
+		const MAX_CHARS = 7000;
+		
+		const updateCounter = () => {
+			const currentLength = input.value.length;
+			const remaining = MAX_CHARS - currentLength;
+			charCounter.textContent = `${currentLength}/${MAX_CHARS} characters`;
+			if (remaining < 100) {
+				charCounter.style.color = 'var(--text-error)';
+			} else if (remaining < 500) {
+				charCounter.style.color = 'var(--text-warning)';
+			} else {
+				charCounter.style.color = 'var(--text-muted)';
+			}
+		};
+
+		// Limit input to 7000 characters
+		input.addEventListener('input', (e: Event) => {
+			const target = e.target as HTMLTextAreaElement;
+			if (target.value.length > MAX_CHARS) {
+				target.value = target.value.substring(0, MAX_CHARS);
+			}
+			updateCounter();
+		});
+
+		// Initialize counter
+		updateCounter();
 
 		// Color picker
 		const colorContainer = contentEl.createDiv();
@@ -1386,10 +2605,12 @@ class MarginNoteModal extends Modal {
 		buttonContainer.style.justifyContent = 'flex-end';
 		buttonContainer.style.gap = '10px';
 
-		const cancelButton = buttonContainer.createEl('button', { text: 'Cancel' });
+		const cancelButton = buttonContainer.createEl('button');
+		cancelButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg> Cancel';
 		cancelButton.onclick = () => this.close();
 
-		const submitButton = buttonContainer.createEl('button', { text: 'Add marginalia' });
+		const submitButton = buttonContainer.createEl('button');
+		submitButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg> Add marginalia';
 		submitButton.addClass('mod-cta');
 		submitButton.onclick = () => {
 			// Always save the color value (default or custom) to the item
@@ -1415,38 +2636,10 @@ class MarginaliaSettingTab extends PluginSettingTab {
 		this.plugin = plugin;
 	}
 
-	display(): void {
+	async display(): Promise<void> {
 		const { containerEl } = this;
 		containerEl.empty();
 		containerEl.createEl('h2', { text: 'Marginalia Settings' });
-
-		// Ollama Info Section
-		const ollamaInfo = containerEl.createDiv('marginalia-ollama-info');
-		ollamaInfo.style.padding = '10px';
-		ollamaInfo.style.marginBottom = '15px';
-		ollamaInfo.style.backgroundColor = 'var(--background-secondary)';
-		ollamaInfo.style.borderRadius = '4px';
-		ollamaInfo.style.border = '1px solid var(--background-modifier-border)';
-		
-		const infoText = ollamaInfo.createEl('p', { 
-			text: 'AI features require access to an Ollama server, either installed locally or accessible on a network. The server must have the nomic-embed-text:latest and phi3:latest models available.' 
-		});
-		infoText.style.margin = '0';
-		infoText.style.fontSize = '0.9em';
-		infoText.style.color = 'var(--text-normal)';
-		
-		const statusText = ollamaInfo.createEl('p');
-		statusText.style.margin = '5px 0 0 0';
-		statusText.style.fontSize = '0.85em';
-		statusText.style.fontWeight = '500';
-		
-		if (this.plugin.settings.ollamaAvailable) {
-			statusText.textContent = '✓ Ollama is available';
-			statusText.style.color = 'var(--text-success)';
-		} else {
-			statusText.textContent = '✗ Ollama is not available';
-			statusText.style.color = 'var(--text-error)';
-		}
 
 		// Ollama Settings Section
 		containerEl.createEl('h3', { text: 'Ollama Configuration' });
@@ -1461,7 +2654,19 @@ class MarginaliaSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.ollamaAddress)
 					.onChange(async (value) => {
 						this.plugin.settings.ollamaAddress = value;
+						// Reset availability flags to force a new check
+						this.plugin.settings.ollamaAvailable = false;
+						this.plugin.settings.ollamaServerStatus = 'unknown';
+						this.plugin.settings.nomicModelStatus = 'unknown';
+						this.plugin.settings.qwenModelStatus = 'unknown';
 						await this.plugin.saveData(this.plugin.settings);
+						// Update status circles to show unknown state
+						const ollamaCircle = (this as any).ollamaCircle as HTMLElement;
+						const nomicCircle = (this as any).nomicCircle as HTMLElement;
+						const qwenCircle = (this as any).qwenCircle as HTMLElement;
+						if (ollamaCircle && nomicCircle && qwenCircle) {
+							this.updateStatusCircles(ollamaCircle, nomicCircle, qwenCircle);
+						}
 					});
 			});
 
@@ -1475,40 +2680,100 @@ class MarginaliaSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.ollamaPort)
 					.onChange(async (value) => {
 						this.plugin.settings.ollamaPort = value;
+						// Reset availability flags to force a new check
+						this.plugin.settings.ollamaAvailable = false;
+						this.plugin.settings.ollamaServerStatus = 'unknown';
+						this.plugin.settings.nomicModelStatus = 'unknown';
+						this.plugin.settings.qwenModelStatus = 'unknown';
 						await this.plugin.saveData(this.plugin.settings);
+						// Update status circles to show unknown state
+						const ollamaCircle = (this as any).ollamaCircle as HTMLElement;
+						const nomicCircle = (this as any).nomicCircle as HTMLElement;
+						const qwenCircle = (this as any).qwenCircle as HTMLElement;
+						if (ollamaCircle && nomicCircle && qwenCircle) {
+							this.updateStatusCircles(ollamaCircle, nomicCircle, qwenCircle);
+						}
 					});
 			});
 
-		// Check Ollama Button
+		// Note about required models (below Port, above Check)
+		const modelNote = containerEl.createDiv();
+		modelNote.style.marginTop = '10px';
+		modelNote.style.marginBottom = '20px';
+		modelNote.style.padding = '10px';
+		modelNote.style.backgroundColor = 'var(--background-secondary)';
+		modelNote.style.borderRadius = '4px';
+		modelNote.style.fontSize = '0.9em';
+		modelNote.style.color = 'var(--text-muted)';
+		modelNote.innerHTML = '<strong>Required Models:</strong> The following models must be installed in Ollama for AI features to work:<br>' +
+			'• <code>nomic-embed-text:latest</code> - For generating embeddings<br>' +
+			'• <code>qwen2.5:3b-instruct</code> - For summarization and title generation';
+
+		// Check Ollama Status
 		const checkOllamaSetting = new Setting(containerEl)
-			.setName('Check Ollama Connection')
-			.setDesc('Verify that Ollama server is running and required models are available')
+			.setName('Check Ollama Status')
+			.setDesc('Verify that Ollama server is running and required models are available. The three status indicators below will turn green when all systems are "Go".')
 			.addButton(button => {
 				button
 					.setButtonText('Check Ollama')
 					.setCta()
 					.onClick(async () => {
 						await this.checkOllama();
-						// Update status text after check
-						const ollamaInfo = containerEl.querySelector('.marginalia-ollama-info');
-						if (ollamaInfo) {
-							const statusText = ollamaInfo.querySelector('p:last-child') as HTMLElement;
-							if (statusText) {
-								if (this.plugin.settings.ollamaAvailable) {
-									statusText.textContent = '✓ Ollama is available';
-									statusText.style.color = 'var(--text-success)';
-								} else {
-									statusText.textContent = '✗ Ollama is not available';
-									statusText.style.color = 'var(--text-error)';
-								}
-							}
-						}
 					});
 			});
 
-		// Default Similarity Threshold Slider (under Ollama Configuration)
+		// Status display area with three circles (below the setting, not inside controlEl)
+		const statusDiv = containerEl.createDiv('ollama-status');
+		statusDiv.style.marginTop = '10px';
+		statusDiv.style.marginBottom = '20px';
+		statusDiv.style.padding = '10px';
+		statusDiv.style.backgroundColor = 'var(--background-secondary)';
+		statusDiv.style.borderRadius = '4px';
+		statusDiv.style.display = 'flex';
+		statusDiv.style.gap = '15px';
+		statusDiv.style.alignItems = 'center';
+		statusDiv.style.justifyContent = 'center';
+
+		// Create three status circles
+		const ollamaCircle = statusDiv.createDiv('ollama-status-circle');
+		const nomicCircle = statusDiv.createDiv('ollama-status-circle');
+		const qwenCircle = statusDiv.createDiv('ollama-status-circle');
+
+		// Style circles
+		[ollamaCircle, nomicCircle, qwenCircle].forEach(circle => {
+			circle.style.width = '20px';
+			circle.style.height = '20px';
+			circle.style.borderRadius = '50%';
+			circle.style.border = '2px solid var(--background-modifier-border)';
+			circle.style.backgroundColor = 'var(--background-modifier-border)';
+			circle.style.cursor = 'help';
+		});
+
+		// Set initial tooltips and colors based on last saved status
+		this.updateStatusCircles(ollamaCircle, nomicCircle, qwenCircle);
+
+		// Store references for updates
+		(this as any).statusDiv = statusDiv;
+		(this as any).ollamaCircle = ollamaCircle;
+		(this as any).nomicCircle = nomicCircle;
+		(this as any).qwenCircle = qwenCircle;
+
+		// Semantic Similarity Sub-section
+		containerEl.createEl('h4', { text: 'Semantic Similarity' });
+		
+		// Note about semantic similarity
+		const similarityNote = containerEl.createDiv();
+		similarityNote.style.marginBottom = '15px';
+		similarityNote.style.padding = '10px';
+		similarityNote.style.backgroundColor = 'var(--background-secondary)';
+		similarityNote.style.borderRadius = '4px';
+		similarityNote.style.fontSize = '0.9em';
+		similarityNote.style.color = 'var(--text-muted)';
+		similarityNote.innerHTML = 'Marginalia uses AI-powered semantic similarity analysis to help surface similar notes, marginalia, and selections. Note that these features will be limited until embedding, below, is 100% complete. Leave embedding active to continue to watch for new files and changes in the specified folders in your vault.';
+		
+		// Similarity Threshold Slider
 		new Setting(containerEl)
-			.setName('Default Similarity Threshold')
+			.setName('Similarity Threshold')
 			.setDesc(`Default similarity threshold for AI functions (${(this.plugin.settings.defaultSimilarity * 100).toFixed(0)}%)`)
 			.addSlider(slider => {
 				slider
@@ -1525,15 +2790,82 @@ class MarginaliaSettingTab extends PluginSettingTab {
 					});
 			});
 
-		// Status display area
-		const statusDiv = containerEl.createDiv('ollama-status');
-		statusDiv.style.marginTop = '10px';
-		statusDiv.style.padding = '10px';
-		statusDiv.style.borderRadius = '4px';
-		statusDiv.style.display = 'none';
+		// Folders to Include in Similarity Analysis
+		new Setting(containerEl)
+			.setName('Folders to Include')
+			.setDesc('Comma-separated list of folders to include in similarity analysis. Only .md files will be used.')
+			.addText(text => {
+				text
+					.setPlaceholder('folder1, folder2/subfolder')
+					.setValue(this.plugin.settings.similarityFolders || '')
+					.onChange(async (value) => {
+						this.plugin.settings.similarityFolders = value;
+						try {
+							await this.plugin.saveData(this.plugin.settings);
+						} catch (error) {
+							console.error('Error saving settings:', error);
+							new Notice('Error saving folder settings');
+						}
+					});
+			});
 
-		// Store reference for updates
-		(this as any).statusDiv = statusDiv;
+		// Embedding Toggle Button
+		const embeddingSetting = new Setting(containerEl)
+			.setName('Note Embedding')
+			.setDesc('Loading progress...')
+			.addButton(button => {
+				button
+					.setButtonText(this.plugin.settings.embeddingOn ? 'Pause Embedding' : 'Activate Note Embedding')
+					.setCta()
+					.onClick(async () => {
+						// Toggle the embedding state
+						const wasOff = !this.plugin.settings.embeddingOn;
+						this.plugin.settings.embeddingOn = !this.plugin.settings.embeddingOn;
+						
+						try {
+							await this.plugin.saveData(this.plugin.settings);
+							
+							// If embedding was just turned off, clear the queue
+							if (!wasOff && !this.plugin.settings.embeddingOn) {
+								this.plugin.clearEmbeddingQueue();
+							}
+							
+							// If embedding was just turned on, initialize the embedding file and start monitoring
+							if (wasOff && this.plugin.settings.embeddingOn) {
+								try {
+									await this.plugin.initializeEmbeddingFile();
+									// Start monitoring immediately
+									this.plugin.startEmbeddingMonitor();
+								} catch (error) {
+									console.error('Error initializing embedding file:', error);
+									new Notice('Error initializing embedding file');
+									// Revert the toggle if file creation failed
+									this.plugin.settings.embeddingOn = false;
+									await this.plugin.saveData(this.plugin.settings);
+									return;
+								}
+							}
+							
+							// Update button text and description
+							button.setButtonText(this.plugin.settings.embeddingOn ? 'Pause Embedding' : 'Activate Note Embedding');
+							await this.updateEmbeddingProgress(embeddingSetting);
+							new Notice(this.plugin.settings.embeddingOn 
+								? 'Note embedding activated' 
+								: 'Note embedding paused');
+						} catch (error) {
+							console.error('Error saving settings:', error);
+							new Notice('Error saving embedding state');
+						}
+					});
+			});
+
+		// Update embedding progress display on initial load (await to ensure it completes)
+		await this.updateEmbeddingProgress(embeddingSetting);
+		
+		// Register callback with plugin to update progress after files are embedded
+		this.plugin.embeddingProgressCallback = () => {
+			this.updateEmbeddingProgress(embeddingSetting);
+		};
 
 		// Highlight Color Picker
 		containerEl.createEl('h3', { text: 'Appearance' });
@@ -1672,65 +3004,35 @@ class MarginaliaSettingTab extends PluginSettingTab {
 
 	}
 
-	private async checkOllamaOnStartup() {
-		// Check Ollama availability silently on startup
-		const address = this.plugin.settings.ollamaAddress || 'localhost';
-		const port = this.plugin.settings.ollamaPort || '11434';
-		const baseUrl = `http://${address}:${port}`;
-
-		try {
-			const response = await fetch(`${baseUrl}/api/tags`, {
-				method: 'GET',
-				headers: {
-					'Content-Type': 'application/json'
-				}
-			});
-
-			if (response.ok) {
-				const data = await response.json();
-				const models = data.models || [];
-				const modelNames = models.map((m: any) => m.name || m.model || '');
-
-				// Check for required models
-				const requiredModels = ['nomic-embed-text:latest', 'phi3:latest'];
-				let allModelsAvailable = true;
-
-				for (const requiredModel of requiredModels) {
-					const found = modelNames.some((name: string) => 
-						name === requiredModel || name.startsWith(requiredModel.split(':')[0])
-					);
-					if (!found) {
-						allModelsAvailable = false;
-						break;
-					}
-				}
-
-				this.plugin.settings.ollamaAvailable = allModelsAvailable;
-			} else {
-				this.plugin.settings.ollamaAvailable = false;
-			}
-		} catch (error) {
-			this.plugin.settings.ollamaAvailable = false;
-		}
-
-		await this.plugin.saveData(this.plugin.settings);
-	}
 
 	private async checkOllama() {
 		const statusDiv = (this as any).statusDiv as HTMLElement;
-		if (!statusDiv) return;
+		const ollamaCircle = (this as any).ollamaCircle as HTMLElement;
+		const nomicCircle = (this as any).nomicCircle as HTMLElement;
+		const qwenCircle = (this as any).qwenCircle as HTMLElement;
+		
+		if (!statusDiv || !ollamaCircle || !nomicCircle || !qwenCircle) return;
 
 		const address = this.plugin.settings.ollamaAddress || 'localhost';
 		const port = this.plugin.settings.ollamaPort || '11434';
 		const baseUrl = `http://${address}:${port}`;
 
-		statusDiv.style.display = 'block';
-		statusDiv.innerHTML = '<p>Checking Ollama connection...</p>';
-		statusDiv.style.backgroundColor = 'var(--background-secondary)';
-		statusDiv.style.color = 'var(--text-normal)';
+		// Set circles to gray (checking)
+		[ollamaCircle, nomicCircle, qwenCircle].forEach(circle => {
+			circle.style.backgroundColor = 'var(--background-modifier-border)';
+			circle.style.borderColor = 'var(--background-modifier-border)';
+		});
+		ollamaCircle.title = 'Ollama server: Checking...';
+		nomicCircle.title = 'nomic-embed-text: Checking...';
+		qwenCircle.title = 'qwen2.5:3b-instruct: Checking...';
 
-		const warnings: string[] = [];
-		const errors: string[] = [];
+		let ollamaAvailable = false;
+		let nomicAvailable = false;
+		let qwenAvailable = false;
+
+		// Set up timeout (10 seconds)
+		const controller = new AbortController();
+		const timeoutId = setTimeout(() => controller.abort(), 10000);
 
 		try {
 			// Check if server is reachable
@@ -1738,87 +3040,188 @@ class MarginaliaSettingTab extends PluginSettingTab {
 				method: 'GET',
 				headers: {
 					'Content-Type': 'application/json'
-				}
+				},
+				signal: controller.signal
 			});
+			
+			clearTimeout(timeoutId);
 
 			if (!response.ok) {
-				errors.push(`Server returned error: ${response.status} ${response.statusText}`);
+				// Ollama server not available
+				ollamaCircle.style.backgroundColor = '#ef4444'; // red
+				ollamaCircle.style.borderColor = '#ef4444';
+				ollamaCircle.title = `Ollama server: Connection failed (${response.status} ${response.statusText})`;
+				
+				nomicCircle.style.backgroundColor = 'var(--background-modifier-border)';
+				nomicCircle.style.borderColor = 'var(--background-modifier-border)';
+				nomicCircle.title = 'nomic-embed-text: Cannot check (server unavailable)';
+				
+				qwenCircle.style.backgroundColor = 'var(--background-modifier-border)';
+				qwenCircle.style.borderColor = 'var(--background-modifier-border)';
+				qwenCircle.title = 'qwen2.5:3b-instruct: Cannot check (server unavailable)';
+				
 				this.plugin.settings.ollamaAvailable = false;
 			} else {
+				// Ollama server is available
+				ollamaAvailable = true;
+				ollamaCircle.style.backgroundColor = '#22c55e'; // green
+				ollamaCircle.style.borderColor = '#22c55e';
+				ollamaCircle.title = 'Ollama server: Connected successfully';
+
 				const data = await response.json();
 				const models = data.models || [];
 				const modelNames = models.map((m: any) => m.name || m.model || '');
 
-				// Check for required models
-				const requiredModels = ['nomic-embed-text:latest', 'phi3:latest'];
-				const missingModels: string[] = [];
-
-				for (const requiredModel of requiredModels) {
-					const found = modelNames.some((name: string) => 
-						name === requiredModel || name.startsWith(requiredModel.split(':')[0])
-					);
-					if (!found) {
-						missingModels.push(requiredModel);
-					}
-				}
-
-				if (missingModels.length > 0) {
-					warnings.push(`Missing required models: ${missingModels.join(', ')}`);
-					this.plugin.settings.ollamaAvailable = false;
+				// Check for nomic-embed-text
+				const nomicFound = modelNames.some((name: string) => 
+					name === 'nomic-embed-text:latest' || name.startsWith('nomic-embed-text')
+				);
+				if (nomicFound) {
+					nomicAvailable = true;
+					nomicCircle.style.backgroundColor = '#22c55e'; // green
+					nomicCircle.style.borderColor = '#22c55e';
+					nomicCircle.title = 'nomic-embed-text: Available';
 				} else {
-					this.plugin.settings.ollamaAvailable = true;
+					nomicCircle.style.backgroundColor = '#ef4444'; // red
+					nomicCircle.style.borderColor = '#ef4444';
+					nomicCircle.title = 'nomic-embed-text: Not found';
 				}
 
-				// Display results
-				if (errors.length > 0) {
-					statusDiv.style.backgroundColor = 'rgba(255, 0, 0, 0.1)';
-					statusDiv.style.border = '1px solid rgba(255, 0, 0, 0.3)';
-					statusDiv.innerHTML = `
-						<p style="color: var(--text-error); font-weight: bold;">❌ Connection Failed</p>
-						<ul style="margin: 5px 0; padding-left: 20px;">
-							${errors.map(e => `<li>${e}</li>`).join('')}
-						</ul>
-					`;
-				} else if (warnings.length > 0) {
-					statusDiv.style.backgroundColor = 'rgba(255, 193, 7, 0.1)';
-					statusDiv.style.border = '1px solid rgba(255, 193, 7, 0.3)';
-					statusDiv.innerHTML = `
-						<p style="color: var(--text-warning); font-weight: bold;">⚠️ Warnings</p>
-						<ul style="margin: 5px 0; padding-left: 20px;">
-							${warnings.map(w => `<li>${w}</li>`).join('')}
-						</ul>
-					`;
+				// Check for qwen2.5:3b-instruct
+				const qwenFound = modelNames.some((name: string) => 
+					name === 'qwen2.5:3b-instruct' || name.startsWith('qwen2.5:3b-instruct') || name.startsWith('qwen2.5')
+				);
+				if (qwenFound) {
+					qwenAvailable = true;
+					qwenCircle.style.backgroundColor = '#22c55e'; // green
+					qwenCircle.style.borderColor = '#22c55e';
+					qwenCircle.title = 'qwen2.5:3b-instruct: Available';
 				} else {
-					statusDiv.style.backgroundColor = 'rgba(0, 255, 0, 0.1)';
-					statusDiv.style.border = '1px solid rgba(0, 255, 0, 0.3)';
-					statusDiv.innerHTML = `
-						<p style="color: var(--text-success); font-weight: bold;">✅ Connection Successful</p>
-						<p style="margin: 5px 0;">Ollama server is running and all required models are available.</p>
-						<p style="margin: 5px 0; font-size: 0.9em; color: var(--text-muted);">
-							Required models found: nomic-embed-text:latest, phi3:latest
-						</p>
-					`;
+					qwenCircle.style.backgroundColor = '#ef4444'; // red
+					qwenCircle.style.borderColor = '#ef4444';
+					qwenCircle.title = 'qwen2.5:3b-instruct: Not found';
 				}
+
+				// Update overall availability
+				this.plugin.settings.ollamaAvailable = ollamaAvailable && nomicAvailable && qwenAvailable;
 			}
 			
 			// Save the availability state
 			await this.plugin.saveData(this.plugin.settings);
 		} catch (error: any) {
+			clearTimeout(timeoutId);
+			// Connection error or timeout
+			const errorMessage = error.name === 'AbortError' ? 'Connection timeout (10 seconds)' : (error.message || 'Network error');
+			ollamaCircle.style.backgroundColor = '#ef4444'; // red
+			ollamaCircle.style.borderColor = '#ef4444';
+			ollamaCircle.title = `Ollama server: Connection failed (${errorMessage})`;
+			
+			nomicCircle.style.backgroundColor = 'var(--background-modifier-border)';
+			nomicCircle.style.borderColor = 'var(--background-modifier-border)';
+			nomicCircle.title = 'nomic-embed-text: Cannot check (server unavailable)';
+			
+			qwenCircle.style.backgroundColor = 'var(--background-modifier-border)';
+			qwenCircle.style.borderColor = 'var(--background-modifier-border)';
+			qwenCircle.title = 'qwen2.5:3b-instruct: Cannot check (server unavailable)';
+			
+			// Update individual statuses
+			this.plugin.settings.ollamaServerStatus = 'unavailable';
+			this.plugin.settings.nomicModelStatus = 'unknown';
+			this.plugin.settings.qwenModelStatus = 'unknown';
 			this.plugin.settings.ollamaAvailable = false;
 			await this.plugin.saveData(this.plugin.settings);
-			
-			statusDiv.style.backgroundColor = 'rgba(255, 0, 0, 0.1)';
-			statusDiv.style.border = '1px solid rgba(255, 0, 0, 0.3)';
-			statusDiv.innerHTML = `
-				<p style="color: var(--text-error); font-weight: bold;">❌ Connection Failed</p>
-				<p style="margin: 5px 0;">Unable to connect to Ollama server at ${baseUrl}</p>
-				<p style="margin: 5px 0; font-size: 0.9em; color: var(--text-muted);">
-					Error: ${error.message || 'Network error or server not running'}
-				</p>
-				<p style="margin: 5px 0; font-size: 0.9em; color: var(--text-muted);">
-					Make sure Ollama is running and the address/port are correct.
-				</p>
-			`;
 		}
+	}
+
+	/**
+	 * Update status circles based on saved status
+	 */
+	private updateStatusCircles(ollamaCircle: HTMLElement, nomicCircle: HTMLElement, qwenCircle: HTMLElement): void {
+		// Update Ollama server circle
+		if (this.plugin.settings.ollamaServerStatus === 'available') {
+			ollamaCircle.style.backgroundColor = '#22c55e'; // green
+			ollamaCircle.style.borderColor = '#22c55e';
+			ollamaCircle.title = 'Ollama server: Connected successfully';
+		} else if (this.plugin.settings.ollamaServerStatus === 'unavailable') {
+			ollamaCircle.style.backgroundColor = '#ef4444'; // red
+			ollamaCircle.style.borderColor = '#ef4444';
+			ollamaCircle.title = 'Ollama server: Connection failed';
+		} else {
+			ollamaCircle.style.backgroundColor = 'var(--background-modifier-border)';
+			ollamaCircle.style.borderColor = 'var(--background-modifier-border)';
+			ollamaCircle.title = 'Ollama server: Not checked';
+		}
+
+		// Update nomic-embed-text circle
+		if (this.plugin.settings.nomicModelStatus === 'available') {
+			nomicCircle.style.backgroundColor = '#22c55e'; // green
+			nomicCircle.style.borderColor = '#22c55e';
+			nomicCircle.title = 'nomic-embed-text: Available';
+		} else if (this.plugin.settings.nomicModelStatus === 'unavailable') {
+			nomicCircle.style.backgroundColor = '#ef4444'; // red
+			nomicCircle.style.borderColor = '#ef4444';
+			nomicCircle.title = 'nomic-embed-text: Not found';
+		} else {
+			nomicCircle.style.backgroundColor = 'var(--background-modifier-border)';
+			nomicCircle.style.borderColor = 'var(--background-modifier-border)';
+			nomicCircle.title = 'nomic-embed-text: Not checked';
+		}
+
+		// Update qwen2.5:3b-instruct circle
+		if (this.plugin.settings.qwenModelStatus === 'available') {
+			qwenCircle.style.backgroundColor = '#22c55e'; // green
+			qwenCircle.style.borderColor = '#22c55e';
+			qwenCircle.title = 'qwen2.5:3b-instruct: Available';
+		} else if (this.plugin.settings.qwenModelStatus === 'unavailable') {
+			qwenCircle.style.backgroundColor = '#ef4444'; // red
+			qwenCircle.style.borderColor = '#ef4444';
+			qwenCircle.title = 'qwen2.5:3b-instruct: Not found';
+		} else {
+			qwenCircle.style.backgroundColor = 'var(--background-modifier-border)';
+			qwenCircle.style.borderColor = 'var(--background-modifier-border)';
+			qwenCircle.title = 'qwen2.5:3b-instruct: Not checked';
+		}
+	}
+
+	/**
+	 * Update embedding progress display
+	 */
+	private async updateEmbeddingProgress(embeddingSetting: Setting): Promise<void> {
+		try {
+			const progress = await this.plugin.getEmbeddingProgress();
+			const remaining = progress.total - progress.embedded;
+			
+			let descText = '';
+			if (this.plugin.settings.embeddingOn) {
+				descText = `Note embedding is active. Click to pause.`;
+			} else {
+				descText = `Note embedding is paused. Click to activate.`;
+			}
+			
+			if (progress.total > 0) {
+				descText += ` Progress: ${progress.percentage}% (${progress.embedded}/${progress.total} embedded, ${remaining} remaining)`;
+			} else if (this.plugin.settings.similarityFolders) {
+				descText += ` No .md files found in specified folders.`;
+			} else {
+				descText += ` No folders specified for similarity analysis.`;
+			}
+			
+			// Add note about embedding process
+			if (this.plugin.settings.embeddingOn && progress.total > 0 && remaining > 0) {
+				descText += ` Note: Not all AI functions will be available and the system may slow until embedding is complete. This process takes longest the very first time and may need to think about (and appear to pause on) bigger notes.`;
+			}
+			
+			embeddingSetting.setDesc(descText);
+		} catch (error) {
+			console.error('Error updating embedding progress:', error);
+			embeddingSetting.setDesc(this.plugin.settings.embeddingOn 
+				? 'Note embedding is active. Click to pause.' 
+				: 'Note embedding is paused. Click to activate.');
+		}
+	}
+
+	onClose(): void {
+		// Clear embedding progress callback when settings tab closes
+		this.plugin.embeddingProgressCallback = null;
 	}
 }

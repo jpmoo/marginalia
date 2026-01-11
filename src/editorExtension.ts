@@ -224,6 +224,8 @@ function marginaliaField(plugin: MarginaliaPlugin) {
 									const rgb = hexToRgb(itemColor);
 									const rgbaColor = rgb ? `rgba(${rgb.r}, ${rgb.g}, ${rgb.b}, ${itemOpacity})` : itemColor;
 									
+									// Create a single mark for the entire selection
+									// CodeMirror will handle line breaks automatically
 									decorationInfo.push({
 										from,
 										to,

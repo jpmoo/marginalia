@@ -1,8 +1,50 @@
 /* Marginalia Highlight Styles */
 .marginalia-highlight {
-	background-color: var(--marginalia-highlight-bg, rgba(255, 235, 59, 0.3));
 	cursor: pointer;
 	transition: background-color 0.2s;
+	/* Ensure highlight is truly inline with text - critical for proper rendering */
+	display: inline !important;
+	position: static !important;
+	/* Remove any properties that could create box appearance */
+	margin: 0 !important;
+	padding: 0 !important;
+	border: none !important;
+	outline: none !important;
+	box-shadow: none !important;
+	text-decoration: none !important;
+	line-height: inherit;
+	vertical-align: baseline !important;
+	/* Ensure background only covers text, respecting indentation */
+	box-decoration-break: slice;
+	-webkit-box-decoration-break: slice;
+	/* Prevent any width/height that could create boxes */
+	width: auto !important;
+	height: auto !important;
+	/* Ensure it's part of text flow, not positioned separately */
+	float: none !important;
+	clear: none !important;
+}
+
+/* Fix for highlights inside CodeMirror indentation spans */
+/* When a highlight is inside cm-indent, it means the selection includes indentation */
+/* We need to ensure it doesn't create a visible box */
+.cm-indent .marginalia-highlight {
+	/* Make the highlight invisible or minimal when it's only covering indentation */
+	/* The actual text highlight should be in the text content, not the indent */
+	background-color: transparent !important;
+	/* Or make it very subtle so it doesn't appear as a box */
+	/* background-color: rgba(255, 235, 59, 0.1) !important; */
+}
+
+/* Ensure cm-indent itself doesn't create box appearance when it contains our highlight */
+.cm-indent:has(.marginalia-highlight) {
+	/* Remove any styling that could create a box */
+	display: inline !important;
+	position: static !important;
+	margin: 0 !important;
+	padding: 0 !important;
+	border: none !important;
+	background: transparent !important;
 }
 
 .marginalia-highlight:hover {
