@@ -269,3 +269,7 @@ This is a vibe-coded plugin, so contributions that improve functionality or fix 
 ## Acknowledgments
 
 Developed through iterative, user-driven refinement. The feature set reflects real-world usage patterns and evolving requirements.
+
+Credit also goes to the anonymous and exhausted medieval Celtic monks who wrote interesting, funny, and heart-felt notes in the margins of all of those gloriously illuminated manuscripts.
+
+/ghost
