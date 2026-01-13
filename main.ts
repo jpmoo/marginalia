@@ -1,4 +1,4 @@
-import { Plugin, MarkdownView, TFile, Modal, PluginSettingTab, WorkspaceLeaf, Setting, Notice } from 'obsidian';
+import { Plugin, MarkdownView, TFile, Modal, PluginSettingTab, WorkspaceLeaf, Setting, Notice, App } from 'obsidian';
 import { MarginaliaView, EditMarginaliaModal, DeleteConfirmationModal } from './src/sidebar';
 import { MarginaliaEditorExtension } from './src/editorExtension';
 import { MarginaliaData, MarginaliaItem } from './src/types';
@@ -3677,6 +3677,7 @@ class MarginaliaSettingTab extends PluginSettingTab {
 							// Update button text and description
 							button.setButtonText(this.plugin.settings.embeddingOn ? 'Pause Embedding' : 'Activate Note Embedding');
 							await this.updateEmbeddingProgress(embeddingSetting);
+							updateDeleteRedoButtonVisibility();
 							new Notice(this.plugin.settings.embeddingOn 
 								? 'Note embedding activated' 
 								: 'Note embedding not active');
@@ -3686,6 +3687,84 @@ class MarginaliaSettingTab extends PluginSettingTab {
 						}
 					});
 			});
+
+		// Delete and Redo Embeddings Button (only visible when embeddings are not 0% complete)
+		const deleteRedoSetting = new Setting(containerEl)
+			.setName('Delete and Redo Embeddings')
+			.setDesc('This will delete all embeddings and start fresh. This action cannot be undone.');
+		
+		// Store setting reference immediately for visibility updates
+		(this as any).deleteRedoSetting = deleteRedoSetting;
+		
+		deleteRedoSetting.addButton(button => {
+			button
+				.setButtonText('Delete and Redo Embeddings')
+				.setWarning()
+				.onClick(async () => {
+					// Show confirmation modal
+					const confirmModal = new DeleteEmbeddingsConfirmationModal(this.app, async () => {
+						try {
+							// Delete the notes_embedding.json file
+							const embeddingPath = this.plugin.getEmbeddingFilePath();
+							const embeddingFile = this.app.vault.getAbstractFileByPath(embeddingPath);
+							
+							if (embeddingFile instanceof TFile) {
+								await this.app.vault.delete(embeddingFile);
+								console.log('Deleted notes_embedding.json');
+								
+								// Re-initialize the embedding file to start fresh
+								await this.plugin.initializeEmbeddingFile();
+								
+								// If embedding is active, start the monitor to begin re-embedding
+								if (this.plugin.settings.embeddingOn) {
+									this.plugin.startEmbeddingMonitor();
+								}
+								
+								new Notice('All embeddings deleted. Re-embedding will begin automatically if embedding is active.');
+								
+								// Update progress display
+								await this.updateEmbeddingProgress(embeddingSetting);
+								updateDeleteRedoButtonVisibility();
+								await updateChunkStatistics();
+							} else {
+								new Notice('Embeddings file not found. Nothing to delete.');
+							}
+						} catch (error: any) {
+							console.error('Error deleting embeddings:', error);
+							new Notice(`Error: ${error.message || 'Failed to delete embeddings'}`);
+						}
+					});
+					confirmModal.open();
+				});
+			
+			// Store button reference for visibility updates
+			(this as any).deleteRedoButton = button;
+		});
+
+		// Function to update delete/redo button visibility based on embedding progress
+		const updateDeleteRedoButtonVisibility = async () => {
+			try {
+				const progress = await this.plugin.getEmbeddingProgress();
+				const hasProgress = progress.percentage > 0 && progress.total > 0;
+				
+				if ((this as any).deleteRedoSetting) {
+					if (hasProgress) {
+						(this as any).deleteRedoSetting.settingEl.style.display = '';
+					} else {
+						(this as any).deleteRedoSetting.settingEl.style.display = 'none';
+					}
+				}
+			} catch (error) {
+				console.error('Error checking embedding progress for delete button:', error);
+				// Hide button on error
+				if ((this as any).deleteRedoSetting) {
+					(this as any).deleteRedoSetting.settingEl.style.display = 'none';
+				}
+			}
+		};
+
+		// Initial visibility check
+		await updateDeleteRedoButtonVisibility();
 
 		// Chunk Statistics Settings
 		const avgChunkLengthAllSetting = new Setting(containerEl)
@@ -4084,5 +4163,48 @@ class MarginaliaSettingTab extends PluginSettingTab {
 			clearInterval(interval);
 			(this as any).embeddingStatusCheckInterval = null;
 		}
+	}
+}
+
+/**
+ * Confirmation modal for deleting all embeddings
+ */
+class DeleteEmbeddingsConfirmationModal extends Modal {
+	private onConfirm: () => void;
+
+	constructor(app: App, onConfirm: () => void) {
+		super(app);
+		this.onConfirm = onConfirm;
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.empty();
+
+		contentEl.createEl('h2', { text: 'Delete All Embeddings?' });
+		contentEl.createEl('p', { 
+			text: 'This will delete all embeddings and start fresh. This action cannot be undone. Re-embedding will begin automatically if embedding is active.' 
+		});
+
+		const buttonContainer = contentEl.createDiv();
+		buttonContainer.style.marginTop = '20px';
+		buttonContainer.style.display = 'flex';
+		buttonContainer.style.justifyContent = 'flex-end';
+		buttonContainer.style.gap = '10px';
+
+		const cancelButton = buttonContainer.createEl('button', { text: 'Cancel' });
+		cancelButton.onclick = () => this.close();
+
+		const confirmButton = buttonContainer.createEl('button', { text: 'Delete All Embeddings' });
+		confirmButton.addClass('mod-warning');
+		confirmButton.onclick = () => {
+			this.onConfirm();
+			this.close();
+		};
+	}
+
+	onClose() {
+		const { contentEl } = this;
+		contentEl.empty();
 	}
 }

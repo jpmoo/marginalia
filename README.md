@@ -42,13 +42,22 @@ A powerful Obsidian plugin that allows you to add margin notes (marginalia) to y
 
 The plugin includes powerful AI features for finding related marginalia and notes, and creating visualizations:
 
-**Similarity Search Functions**:
-- **Find Notes with Similar Marginalia**: Compare marginalia note text using embeddings to find other marginalia with similar notes
-- **Find Notes with Similar Selection**: Compare selected text using embeddings to find other marginalia with similar selections
-- **Find Notes with Similar Selection + Marginalia**: Combined comparison of both selection and note text using embeddings
-- **Find Notes Similar to Marginalia**: Compare marginalia note text to all note chunks in your vault to find similar notes
-- **Find Notes Similar to Selection**: Compare selected text to all note chunks in your vault to find similar notes
-- **Find Notes Similar to Selection + Marginalia**: Compare combined selection and marginalia to all note chunks in your vault to find similar notes
+**Similarity Search**:
+The AI Functions modal provides a flexible dropdown-based interface for similarity searches. You can combine different search types:
+
+- **Search Target** (first dropdown): Choose what to search for
+  - **marginalia**: Find other marginalia with similar note text
+  - **selections**: Find other marginalia with similar selected text
+  - **combined marginalia and selections**: Find other marginalia with similar combined content
+  - **notes**: Find notes in your vault with similar content (requires note embeddings)
+
+- **Search Source** (second dropdown): Choose what to compare against
+  - **this marginalia**: Use the current marginalia's note text
+  - **this selection**: Use the current marginalia's selected text
+  - **this combination of marginalia and selection**: Use both combined
+  - **this note**: Use the entire current note's content (only available if the note has been embedded)
+
+The interface displays the selected text and marginalia text side-by-side, includes an adjustable similarity threshold slider, and shows results with similarity scores. Click any result to jump directly to that location.
 
 **Export Features**:
 - **Create Table of Contents (TOC)**: Generate a formatted note with the current note (including selection and marginalia) at the top, followed by links to related notes
@@ -177,17 +186,23 @@ Marginalia data is stored in `.obsidian/plugins/marginalia/`:
 
 ### Similarity Search
 
-The plugin uses cosine similarity on embeddings to find related marginalia and notes:
+The plugin uses cosine similarity on embeddings to find related marginalia and notes. The AI Functions modal provides an intuitive dropdown-based interface that lets you combine different search types:
 
-**Marginalia-based searches** (compare to other marginalia):
-- **Find Notes with Similar Marginalia**: Compares the note text embeddings
-- **Find Notes with Similar Selection**: Compares the selected text embeddings
-- **Find Notes with Similar Selection + Marginalia**: Creates combined embeddings for more comprehensive matching
-
-**Note-based searches** (compare to note chunks in your vault):
-- **Find Notes Similar to Marginalia**: Compares marginalia note text to all embedded note chunks
-- **Find Notes Similar to Selection**: Compares selected text to all embedded note chunks
-- **Find Notes Similar to Selection + Marginalia**: Compares combined selection and marginalia to all embedded note chunks
+**How it works**:
+1. Open the AI Functions modal from any marginalia (lightning icon)
+2. The modal displays the selected text and marginalia text side-by-side
+3. Use the first dropdown to choose what to search for:
+   - **marginalia**: Search for marginalia
+   - **selections**: Search for text selections in notes
+   - **combined marginalia and selections**: Search using both combined
+   - **notes**: Search all embedded notes in your vault (requires note embeddings)
+4. Use the second dropdown to choose what to compare against:
+   - **this marginalia**: Compare using the current marginalia's text
+   - **this selection**: Compare using the current marginalia's selection
+   - **this combination**: Compare using both combined
+   - **this note**: Compare using the entire current note (only if note is embedded)
+5. Adjust the similarity threshold slider (default: 0.60)
+6. Click "Search" to find similar items
 
 Results show similarity scores and allow you to jump directly to related notes. The current note is always included at the top of TOC exports with its selection and marginalia text.
 
@@ -224,9 +239,25 @@ Both export features use AI to generate descriptive filenames based on the conte
 - **Better chunking reliability**: Strengthened validation and error handling for semantic text chunking
 - **Consistent embedding logic**: Unified chunking rules and prompts across initial embedding and file system listeners
 - **Periodic embedding checks**: Listener now periodically scans for files needing embedding (e.g., files added outside Obsidian)
+- **UI improvements**: Redesigned AI Functions modal with dropdown-based similarity search interface (800px width, improved layout)
+- **Deterministic chunking**: Automatic splitting of oversized chunks using paragraph/newline/sentence boundaries
+- **Delete and Redo Embeddings**: Added button in settings to delete all embeddings and start fresh (visible when embeddings are not 0% complete)
 
 ### Beta03
-- Initial release with core marginalia functionality and AI-powered similarity features
+- **AI Functions modal**: Introduced comprehensive similarity search interface with dropdown menus
+- **Default similarity threshold**: Set to 0.60 with configurable slider
+- **TOC improvements**: Enhanced table of contents exports with function names and better formatting
+- **View modal**: Added full marginalia view modal with active wiki links
+- **Character limits**: Added 7000 character limit for marginalia notes with real-time countdown
+
+### Beta02
+- **Reading view support**: Added support for viewing marginalia in reading mode
+- **UI improvements**: Fixed button alignment and search text persistence between sidebar tabs
+- **Deletion updates**: Improved deletion handling and UI updates
+
+### Beta01
+- **Initial version**: Core marginalia functionality with highlights, hover tooltips, and sidebar panel
+- **Version and author**: Set to JPMoo
 
 ## License
 
