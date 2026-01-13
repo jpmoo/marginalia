@@ -217,6 +217,17 @@ Both export features use AI to generate descriptive filenames based on the conte
 - Summarization and title generation via Ollama's `/api/generate` endpoint using `qwen2.5:3b-instruct`
 - All Ollama API calls include 10-second timeout protection
 
+## Version History
+
+### Beta04
+- **Improved text chunking**: Enhanced Qwen prompt to prevent concept extraction and ensure proper character position ranges
+- **Better chunking reliability**: Strengthened validation and error handling for semantic text chunking
+- **Consistent embedding logic**: Unified chunking rules and prompts across initial embedding and file system listeners
+- **Periodic embedding checks**: Listener now periodically scans for files needing embedding (e.g., files added outside Obsidian)
+
+### Beta03
+- Initial release with core marginalia functionality and AI-powered similarity features
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) file for details.
