@@ -230,7 +230,6 @@ Both export features use AI to generate descriptive filenames based on the conte
 - Canvas files use Obsidian's native canvas format
 - Embeddings generated via Ollama's `/api/embeddings` endpoint using `nomic-embed-text`
 - Summarization and title generation via Ollama's `/api/generate` endpoint using `qwen2.5:3b-instruct`
-- All Ollama API calls include 10-second timeout protection
 
 ## Version History
 
