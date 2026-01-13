@@ -892,7 +892,7 @@ export class MarginaliaView extends ItemView {
 				this.refresh();
 			});
 			deleteModal.open();
-		});
+		}, this.plugin);
 		modal.open();
 	}
 
@@ -914,9 +914,15 @@ export class AIFunctionsModal extends Modal {
 	private plugin: MarginaliaPlugin;
 	private item: MarginaliaItem;
 	private filePath: string;
-	private functionContent: HTMLElement;
+	private resultsContainer: HTMLElement;
 	private currentSimilarItems: Array<{ item: MarginaliaItem; filePath: string; similarity: number }> = [];
 	private currentFunctionType: string = '';
+	private menu1Select: HTMLSelectElement;
+	private menu2Select: HTMLSelectElement;
+	private slider: HTMLInputElement;
+	private sliderValue: HTMLElement;
+	private hasNoteEmbedding: boolean = false;
+	private exportSection: HTMLElement | null = null;
 
 	constructor(app: any, plugin: MarginaliaPlugin, item: MarginaliaItem, filePath: string) {
 		super(app);
@@ -925,714 +931,682 @@ export class AIFunctionsModal extends Modal {
 		this.filePath = filePath;
 	}
 
-	onOpen() {
+	async onOpen() {
 		const { contentEl } = this;
 		contentEl.empty();
 		contentEl.addClass('marginalia-ai-modal');
 		
-		// Set minimum width and height for the modal content
-		contentEl.style.minWidth = '450px';
-		contentEl.style.width = 'auto';
-		contentEl.style.minHeight = '500px';
-		contentEl.style.maxHeight = '80vh';
-		contentEl.style.overflow = 'visible';
+		// Set modal width to 800px
+		// Style the modal container itself, not just contentEl
+		const modalEl = (this as any).modalEl || contentEl.closest('.modal');
+		if (modalEl) {
+			(modalEl as HTMLElement).style.minWidth = '800px';
+			(modalEl as HTMLElement).style.maxWidth = '800px';
+			(modalEl as HTMLElement).style.width = '800px';
+			(modalEl as HTMLElement).style.padding = '0';
+			(modalEl as HTMLElement).style.margin = '0';
+			(modalEl as HTMLElement).style.boxSizing = 'border-box';
+		}
+		const modalContent = contentEl.closest('.modal-content');
+		if (modalContent) {
+			(modalContent as HTMLElement).style.minWidth = '800px';
+			(modalContent as HTMLElement).style.maxWidth = '800px';
+			(modalContent as HTMLElement).style.width = '800px';
+			(modalContent as HTMLElement).style.padding = '0';
+			(modalContent as HTMLElement).style.margin = '0';
+			(modalContent as HTMLElement).style.boxSizing = 'border-box';
+		}
+		contentEl.style.minWidth = '780px';
+		contentEl.style.maxWidth = '780px';
+		contentEl.style.width = '780px';
+		contentEl.style.padding = '8px';
+		contentEl.style.margin = '0';
+		contentEl.style.boxSizing = 'border-box';
+		contentEl.style.minHeight = '600px';
+		contentEl.style.maxHeight = '85vh';
+		contentEl.style.overflow = 'hidden';
 		
 		contentEl.createEl('h2', { text: 'AI Functions' });
 
-		// Note above the menu
-		const noteEl = contentEl.createEl('p');
-		noteEl.style.marginBottom = '15px';
-		noteEl.style.color = 'var(--text-muted)';
-		noteEl.style.fontSize = '13px';
-		noteEl.textContent = 'Choose a function to run against this marginalia to find similar marginalia, selections, and/or notes from your vault.';
+		// Check if current note has embedding
+		this.hasNoteEmbedding = await this.checkNoteHasEmbedding();
 
-		// Function selection dropdown
-		const functionSelect = contentEl.createEl('select');
-		functionSelect.style.width = '100%';
-		functionSelect.style.minWidth = '400px';
-		functionSelect.style.marginBottom = '20px';
-		functionSelect.style.padding = '8px';
-		functionSelect.style.fontSize = '14px';
-		functionSelect.style.maxHeight = 'none';
-		functionSelect.style.height = 'auto';
-		functionSelect.style.overflow = 'visible';
-		
-		// Add placeholder option (no selection)
-		const optionPlaceholder = functionSelect.createEl('option', { value: '' });
-		optionPlaceholder.textContent = 'Select an AI function...';
-		optionPlaceholder.disabled = true;
-		optionPlaceholder.selected = true;
-		
-		const optionSimilar = functionSelect.createEl('option', { value: 'similar' });
-		optionSimilar.textContent = 'Find Notes with Similar Marginalia';
-		
-		const optionSimilarSelection = functionSelect.createEl('option', { value: 'similar-selection' });
-		optionSimilarSelection.textContent = 'Find Notes with Similar Selection';
-		
-		const optionSimilarCombined = functionSelect.createEl('option', { value: 'similar-combined' });
-		optionSimilarCombined.textContent = 'Find Notes with Similar Selection + Marginalia';
-		
-		const optionNotesSimilar = functionSelect.createEl('option', { value: 'notes-similar' });
-		optionNotesSimilar.textContent = 'Find Notes Similar to Marginalia';
-		
-		const optionNotesSimilarSelection = functionSelect.createEl('option', { value: 'notes-similar-selection' });
-		optionNotesSimilarSelection.textContent = 'Find Notes Similar to Selection';
-		
-		const optionNotesSimilarCombined = functionSelect.createEl('option', { value: 'notes-similar-combined' });
-		optionNotesSimilarCombined.textContent = 'Find Notes Similar to Selection + Marginalia';
-		
-		// No default selection
-		functionSelect.value = '';
-		
-		// Content area for function-specific UI
-		this.functionContent = contentEl.createDiv();
-		this.functionContent.style.marginTop = '20px';
-		
-		// Update UI when function changes
-		functionSelect.onchange = (e) => {
-			const target = e.target as HTMLSelectElement;
-			if (target.value) {
-				this.showFunctionUI(target.value);
-			} else {
-				this.functionContent.empty();
-			}
-		};
-	}
+		// Two scrollable windows side by side
+		const textWindowsContainer = contentEl.createDiv();
+		textWindowsContainer.style.display = 'flex';
+		textWindowsContainer.style.gap = '6px';
+		textWindowsContainer.style.marginBottom = '12px';
+		textWindowsContainer.style.height = '120px';
+		textWindowsContainer.style.width = '100%';
+		textWindowsContainer.style.maxWidth = '100%';
+		textWindowsContainer.style.boxSizing = 'border-box';
+		textWindowsContainer.style.overflow = 'hidden';
+		textWindowsContainer.style.padding = '0';
+		textWindowsContainer.style.marginLeft = '0';
+		textWindowsContainer.style.marginRight = '0';
 
-	private showFunctionUI(functionType: string) {
-		this.functionContent.empty();
-		this.currentFunctionType = functionType;
+		// Selected text window
+		const selectionWindow = textWindowsContainer.createDiv();
+		selectionWindow.style.flex = '1 1 0';
+		selectionWindow.style.border = '1px solid var(--background-modifier-border)';
+		selectionWindow.style.borderRadius = '4px';
+		selectionWindow.style.padding = '4px';
+		selectionWindow.style.backgroundColor = 'var(--background-secondary)';
+		selectionWindow.style.overflowY = 'auto';
+		selectionWindow.style.overflowX = 'hidden';
+		selectionWindow.style.maxHeight = '120px';
+		selectionWindow.style.fontSize = '0.8em';
+		selectionWindow.style.boxSizing = 'border-box';
+		selectionWindow.style.minWidth = '0';
+		selectionWindow.style.width = '0';
+		selectionWindow.style.margin = '0';
 		
-		if (functionType === 'similar') {
-			this.showFindSimilarUI('note');
-		} else if (functionType === 'similar-selection') {
-			this.showFindSimilarUI('selection');
-		} else if (functionType === 'similar-combined') {
-			this.showFindSimilarUI('combined');
-		} else if (functionType === 'notes-similar') {
-			this.showFindNotesSimilarUI('note');
-		} else if (functionType === 'notes-similar-selection') {
-			this.showFindNotesSimilarUI('selection');
-		} else if (functionType === 'notes-similar-combined') {
-			this.showFindNotesSimilarUI('combined');
-		}
-	}
+		const selectionLabel = selectionWindow.createEl('div', { text: 'Selected Text' });
+		selectionLabel.style.fontWeight = 'bold';
+		selectionLabel.style.marginBottom = '8px';
+		selectionLabel.style.fontSize = '0.85em';
+		selectionLabel.style.color = 'var(--text-muted)';
+		
+		const selectionText = selectionWindow.createEl('div');
+		selectionText.style.whiteSpace = 'pre-wrap';
+		selectionText.style.color = 'var(--text-normal)';
+		selectionText.textContent = this.item.text || '(No selection)';
 
-	private getFunctionDisplayName(functionType: string): string {
-		const functionNames: { [key: string]: string } = {
-			'similar': 'Find Notes with Similar Marginalia',
-			'similar-selection': 'Find Notes with Similar Selection',
-			'similar-combined': 'Find Notes with Similar Selection + Marginalia',
-			'notes-similar': 'Find Notes Similar to Marginalia',
-			'notes-similar-selection': 'Find Notes Similar to Selection',
-			'notes-similar-combined': 'Find Notes Similar to Selection + Marginalia'
-		};
-		return functionNames[functionType] || 'Unknown Function';
-	}
+		// Marginalia text window
+		const marginaliaWindow = textWindowsContainer.createDiv();
+		marginaliaWindow.style.flex = '1 1 0';
+		marginaliaWindow.style.border = '1px solid var(--background-modifier-border)';
+		marginaliaWindow.style.borderRadius = '4px';
+		marginaliaWindow.style.padding = '4px';
+		marginaliaWindow.style.backgroundColor = 'var(--background-secondary)';
+		marginaliaWindow.style.overflowY = 'auto';
+		marginaliaWindow.style.overflowX = 'hidden';
+		marginaliaWindow.style.maxHeight = '120px';
+		marginaliaWindow.style.fontSize = '0.8em';
+		marginaliaWindow.style.boxSizing = 'border-box';
+		marginaliaWindow.style.minWidth = '0';
+		marginaliaWindow.style.width = '0';
+		marginaliaWindow.style.margin = '0';
+		
+		const marginaliaLabel = marginaliaWindow.createEl('div', { text: 'Marginalia' });
+		marginaliaLabel.style.fontWeight = 'bold';
+		marginaliaLabel.style.marginBottom = '8px';
+		marginaliaLabel.style.fontSize = '0.85em';
+		marginaliaLabel.style.color = 'var(--text-muted)';
+		
+		const marginaliaText = marginaliaWindow.createEl('div');
+		marginaliaText.style.whiteSpace = 'pre-wrap';
+		marginaliaText.style.color = 'var(--text-normal)';
+		marginaliaText.textContent = this.item.note || '(No marginalia)';
 
-	private showFindSimilarUI(mode: 'note' | 'selection' | 'combined') {
-		// Check if item has the required embedding based on mode
-		let hasRequiredEmbedding = false;
-		let errorMessage = '';
+		// Dropdown menus container
+		const dropdownsContainer = contentEl.createDiv();
+		dropdownsContainer.style.display = 'flex';
+		dropdownsContainer.style.alignItems = 'center';
+		dropdownsContainer.style.gap = '4px';
+		dropdownsContainer.style.marginBottom = '12px';
+		dropdownsContainer.style.flexWrap = 'nowrap';
+		dropdownsContainer.style.width = '100%';
+		dropdownsContainer.style.maxWidth = '100%';
+		dropdownsContainer.style.boxSizing = 'border-box';
+		dropdownsContainer.style.overflow = 'hidden';
+		dropdownsContainer.style.marginLeft = '0';
+		dropdownsContainer.style.marginRight = '0';
+
+		// "Find" label
+		const findLabel = dropdownsContainer.createEl('span');
+		findLabel.textContent = 'Find';
+		findLabel.style.fontSize = '11px';
+		findLabel.style.flexShrink = '0';
+		findLabel.style.whiteSpace = 'nowrap';
+
+		// Menu1 dropdown
+		this.menu1Select = dropdownsContainer.createEl('select');
+		this.menu1Select.style.padding = '3px 4px';
+		this.menu1Select.style.border = '1px solid var(--background-modifier-border)';
+		this.menu1Select.style.borderRadius = '4px';
+		this.menu1Select.style.fontSize = '11px';
+		this.menu1Select.style.background = 'var(--background-primary)';
+		this.menu1Select.style.width = '130px';
+		this.menu1Select.style.maxWidth = '130px';
+		this.menu1Select.style.minWidth = '130px';
+		this.menu1Select.style.boxSizing = 'border-box';
+		this.menu1Select.style.flexShrink = '0';
+
+		this.menu1Select.createEl('option', { value: 'marginalia', text: 'marginalia' });
+		this.menu1Select.createEl('option', { value: 'selections', text: 'selections' });
+		this.menu1Select.createEl('option', { value: 'combined', text: 'combined marginalia and selections' });
+		this.menu1Select.createEl('option', { value: 'notes', text: 'notes' });
+
+		// "that are similar to" label
+		const thatLabel = dropdownsContainer.createEl('span');
+		thatLabel.textContent = 'similar to';
+		thatLabel.style.fontSize = '11px';
+		thatLabel.style.flexShrink = '0';
+		thatLabel.style.whiteSpace = 'nowrap';
+
+		// Menu2 dropdown
+		this.menu2Select = dropdownsContainer.createEl('select');
+		this.menu2Select.style.padding = '3px 4px';
+		this.menu2Select.style.border = '1px solid var(--background-modifier-border)';
+		this.menu2Select.style.borderRadius = '4px';
+		this.menu2Select.style.fontSize = '11px';
+		this.menu2Select.style.background = 'var(--background-primary)';
+		this.menu2Select.style.width = '160px';
+		this.menu2Select.style.maxWidth = '160px';
+		this.menu2Select.style.minWidth = '160px';
+		this.menu2Select.style.boxSizing = 'border-box';
+		this.menu2Select.style.flexShrink = '0';
+
+		this.menu2Select.createEl('option', { value: 'this-marginalia', text: 'this marginalia' });
+		this.menu2Select.createEl('option', { value: 'this-selection', text: 'this selection' });
+		this.menu2Select.createEl('option', { value: 'this-combined', text: 'this combination of marginalia and selection' });
 		
-		if (mode === 'note') {
-			hasRequiredEmbedding = !!(this.item.embedding && Array.isArray(this.item.embedding) && this.item.embedding.length > 0);
-			errorMessage = 'This marginalia does not have a note embedding. Please ensure Ollama is available and embeddings are generated.';
-		} else if (mode === 'selection') {
-			hasRequiredEmbedding = !!(this.item.selectionEmbedding && Array.isArray(this.item.selectionEmbedding) && this.item.selectionEmbedding.length > 0);
-			errorMessage = 'This marginalia does not have a selection embedding. The selected text may be empty or embeddings may not be generated.';
-		} else if (mode === 'combined') {
-			// For combined, we need at least one of note or selection text
-			const hasNote = this.plugin.hasMeaningfulText(this.item.note);
-			const hasSelection = this.plugin.hasMeaningfulText(this.item.text);
-			hasRequiredEmbedding = hasNote || hasSelection;
-			errorMessage = 'This marginalia needs at least a note or selection text to generate a combined embedding.';
-		}
-		
-		if (!hasRequiredEmbedding) {
-			this.functionContent.createEl('p', { 
-				text: errorMessage,
-				cls: 'mod-warning'
-			});
-			return;
+		// Only add "this note" if current note has embedding
+		if (this.hasNoteEmbedding) {
+			this.menu2Select.createEl('option', { value: 'this-note', text: 'this note' });
 		}
 
 		// Similarity threshold slider
-		const sliderContainer = this.functionContent.createDiv();
-		sliderContainer.style.marginBottom = '15px';
+		const sliderContainer = contentEl.createDiv();
+		sliderContainer.style.marginBottom = '12px';
+		sliderContainer.style.display = 'flex';
+		sliderContainer.style.alignItems = 'center';
+		sliderContainer.style.gap = '6px';
+		sliderContainer.style.width = '100%';
+		sliderContainer.style.maxWidth = '100%';
+		sliderContainer.style.boxSizing = 'border-box';
+		sliderContainer.style.overflow = 'hidden';
 		
-		const label = sliderContainer.createEl('label');
-		label.textContent = 'Similarity Threshold: ';
-		label.style.display = 'block';
-		label.style.marginBottom = '5px';
+		const sliderLabel = sliderContainer.createEl('label');
+		sliderLabel.textContent = 'Threshold:';
+		sliderLabel.style.fontSize = '11px';
+		sliderLabel.style.flexShrink = '0';
+		sliderLabel.style.whiteSpace = 'nowrap';
 		
-		const sliderValue = sliderContainer.createSpan();
-		const defaultThreshold = this.plugin.settings.defaultSimilarity || 0.7;
-		sliderValue.textContent = defaultThreshold.toFixed(2);
-		sliderValue.style.marginLeft = '10px';
-		sliderValue.style.fontWeight = 'bold';
+		this.sliderValue = sliderContainer.createSpan();
+		const defaultThreshold = this.plugin.settings.defaultSimilarity || 0.6;
+		this.sliderValue.textContent = defaultThreshold.toFixed(2);
+		this.sliderValue.style.fontWeight = 'bold';
+		this.sliderValue.style.minWidth = '40px';
 		
-		const slider = sliderContainer.createEl('input', { 
+		this.slider = sliderContainer.createEl('input', { 
 			attr: { 
 				type: 'range', 
 				min: '0.5', 
 				max: '1', 
-				step: '0.01', 
+				step: '0.01',
 				value: defaultThreshold.toString()
 			} 
 		});
-		slider.style.width = '100%';
-		slider.style.marginTop = '5px';
+		this.slider.style.flex = '1 1 0';
+		this.slider.style.maxWidth = '200px';
+		this.slider.style.minWidth = '0';
 		
-		slider.oninput = (e) => {
+		this.slider.oninput = (e) => {
 			const target = e.target as HTMLInputElement;
-			sliderValue.textContent = parseFloat(target.value).toFixed(2);
+			this.sliderValue.textContent = parseFloat(target.value).toFixed(2);
 		};
 
-		// Run button
-		const runButton = this.functionContent.createEl('button', { text: 'Find Similar' });
-		runButton.addClass('mod-cta');
-		runButton.style.width = '100%';
-		runButton.style.marginTop = '10px';
-		runButton.style.marginBottom = '20px';
-		
-		// Results container
-		const resultsContainer = this.functionContent.createDiv();
-		resultsContainer.style.marginTop = '20px';
-		
-		runButton.onclick = async () => {
-			const threshold = parseFloat(slider.value);
-			runButton.disabled = true;
-			runButton.textContent = 'Searching...';
-			resultsContainer.empty();
-			
-			try {
-				let similarItems: Array<{ item: MarginaliaItem; filePath: string; similarity: number }>;
-				let resultLabel = '';
-				
-				if (mode === 'note') {
-					similarItems = await this.plugin.findSimilarMarginalia(this.item, threshold);
-					resultLabel = 'similar marginalia (by note)';
-				} else if (mode === 'selection') {
-					similarItems = await this.plugin.findSimilarSelection(this.item, threshold);
-					resultLabel = 'similar selections';
-				} else {
-					similarItems = await this.plugin.findSimilarCombined(this.item, threshold);
-					resultLabel = 'similar combined (note + selection)';
-				}
-				
-				// Store similar items for use by buttons
-				this.currentSimilarItems = similarItems;
-				
-				if (similarItems.length === 0) {
-					resultsContainer.createEl('p', { text: `No ${resultLabel} found above the threshold.` });
-				} else {
-					resultsContainer.createEl('h3', { text: `Found ${similarItems.length} ${resultLabel}:` });
-					
-					const list = resultsContainer.createEl('ul');
-					list.style.listStyle = 'none';
-					list.style.padding = '0';
-					
-					for (const similar of similarItems) {
-						const li = list.createEl('li');
-						li.style.marginBottom = '10px';
-						li.style.padding = '8px';
-						li.style.border = '1px solid var(--background-modifier-border)';
-						li.style.borderRadius = '4px';
-						
-						const link = li.createEl('a', { text: similar.filePath });
-						link.style.cursor = 'pointer';
-						link.style.textDecoration = 'underline';
-						link.style.color = 'var(--text-accent)';
-						link.onclick = () => {
-							this.plugin.jumpToMarginalia(similar.filePath, similar.item.id);
-							this.close();
-						};
-						
-						li.createEl('br');
-						const preview = li.createSpan();
-						preview.textContent = similar.item.note || similar.item.text || 'No text';
-						preview.style.fontSize = '0.9em';
-						preview.style.color = 'var(--text-muted)';
-						
-						li.createEl('br');
-						const similarity = li.createSpan();
-						similarity.textContent = `Similarity: ${(similar.similarity * 100).toFixed(1)}%`;
-						similarity.style.fontSize = '0.85em';
-						similarity.style.color = 'var(--text-muted)';
-					}
-					
-					// Add filename input section with buttons inside
-					const filenameContainer = resultsContainer.createDiv();
-					filenameContainer.style.marginTop = '20px';
-					filenameContainer.style.marginBottom = '20px';
-					filenameContainer.style.padding = '15px';
-					filenameContainer.style.backgroundColor = 'var(--background-secondary)';
-					filenameContainer.style.borderRadius = '4px';
-					filenameContainer.style.border = '1px solid var(--background-modifier-border)';
-					
-					const filenameLabel = filenameContainer.createEl('label');
-					filenameLabel.textContent = 'Export file name:';
-					filenameLabel.style.display = 'block';
-					filenameLabel.style.marginBottom = '8px';
-					filenameLabel.style.fontWeight = '500';
-					
-					const filenameInputContainer = filenameContainer.createDiv();
-					filenameInputContainer.style.display = 'flex';
-					filenameInputContainer.style.gap = '8px';
-					filenameInputContainer.style.alignItems = 'center';
-					filenameInputContainer.style.marginBottom = '15px';
-					
-					const filenameInput = filenameInputContainer.createEl('input', {
-						attr: {
-							type: 'text',
-							placeholder: 'Enter filename...'
-						}
-					});
-					filenameInput.style.flex = '1';
-					filenameInput.style.padding = '6px 10px';
-					filenameInput.style.border = '1px solid var(--background-modifier-border)';
-					filenameInput.style.borderRadius = '4px';
-					filenameInput.style.fontSize = '0.9em';
-					
-					const regenerateButton = filenameInputContainer.createEl('button', { text: 'Regenerate Name' });
-					regenerateButton.style.padding = '6px 12px';
-					regenerateButton.style.border = '1px solid var(--background-modifier-border)';
-					regenerateButton.style.borderRadius = '4px';
-					regenerateButton.style.background = 'var(--background-primary)';
-					regenerateButton.style.cursor = 'pointer';
-					regenerateButton.style.fontSize = '0.9em';
-					regenerateButton.style.whiteSpace = 'nowrap';
-					
-					// Generate initial AI suggestion
-					let currentFileName = '';
-					const generateFileName = async () => {
-						regenerateButton.disabled = true;
-						regenerateButton.textContent = 'Generating...';
-						try {
-							const suggestedName = await this.generateAITitle('TOC');
-							currentFileName = suggestedName;
-							filenameInput.value = suggestedName;
-						} catch (error) {
-							const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-							currentFileName = `Marginalia ${timestamp}`;
-							filenameInput.value = currentFileName;
-						}
-						regenerateButton.disabled = false;
-						regenerateButton.textContent = 'Regenerate Name';
-					};
-					
-					regenerateButton.onclick = generateFileName;
-					
-					// Update currentFileName when user types
-					filenameInput.oninput = () => {
-						currentFileName = filenameInput.value.trim();
-					};
-					
-					// Generate initial suggestion
-					await generateFileName();
-					
-					// Add action buttons inside the filename container
-					const buttonContainer = filenameContainer.createDiv();
-					buttonContainer.style.display = 'flex';
-					buttonContainer.style.gap = '10px';
-					
-					const tocButtonContainer = buttonContainer.createDiv();
-					tocButtonContainer.style.display = 'flex';
-					tocButtonContainer.style.alignItems = 'center';
-					tocButtonContainer.style.gap = '8px';
-					tocButtonContainer.style.flex = '1';
-					
-					const tocButton = tocButtonContainer.createEl('button', { text: 'Create Table of Contents Note' });
-					tocButton.addClass('mod-cta');
-					tocButton.style.flex = '1';
-					
-					const tocProgress = tocButtonContainer.createSpan();
-					tocProgress.style.display = 'none';
-					tocProgress.style.width = '16px';
-					tocProgress.style.height = '16px';
-					tocProgress.style.border = '2px solid var(--text-muted)';
-					tocProgress.style.borderTop = '2px solid var(--text-accent)';
-					tocProgress.style.borderRadius = '50%';
-					tocProgress.style.animation = 'spin 1s linear infinite';
-					
-					tocButton.onclick = async () => {
-						const fileName = filenameInput.value.trim() || currentFileName || 'Marginalia TOC';
-						if (!fileName) {
-							new Notice('Please enter a filename');
-							return;
-						}
-						tocButton.disabled = true;
-						tocButton.style.opacity = '0.6';
-						tocProgress.style.display = 'block';
-						try {
-							await this.createTableOfContents(fileName);
-						} finally {
-							tocButton.disabled = false;
-							tocButton.style.opacity = '1';
-							tocProgress.style.display = 'none';
-						}
-					};
-					
-					const canvasButtonContainer = buttonContainer.createDiv();
-					canvasButtonContainer.style.display = 'flex';
-					canvasButtonContainer.style.alignItems = 'center';
-					canvasButtonContainer.style.gap = '8px';
-					canvasButtonContainer.style.flex = '1';
-					
-					const canvasButton = canvasButtonContainer.createEl('button', { text: 'Create Canvas' });
-					canvasButton.addClass('mod-cta');
-					canvasButton.style.flex = '1';
-					
-					const canvasProgress = canvasButtonContainer.createSpan();
-					canvasProgress.style.display = 'none';
-					canvasProgress.style.width = '16px';
-					canvasProgress.style.height = '16px';
-					canvasProgress.style.border = '2px solid var(--text-muted)';
-					canvasProgress.style.borderTop = '2px solid var(--text-accent)';
-					canvasProgress.style.borderRadius = '50%';
-					canvasProgress.style.animation = 'spin 1s linear infinite';
-					
-					canvasButton.onclick = async () => {
-						const fileName = filenameInput.value.trim() || currentFileName || 'Marginalia Canvas';
-						if (!fileName) {
-							new Notice('Please enter a filename');
-							return;
-						}
-						canvasButton.disabled = true;
-						canvasButton.style.opacity = '0.6';
-						canvasProgress.style.display = 'block';
-						try {
-							await this.createCanvas(fileName);
-						} finally {
-							canvasButton.disabled = false;
-							canvasButton.style.opacity = '1';
-							canvasProgress.style.display = 'none';
-						}
-					};
-				}
-			} catch (error: any) {
-				resultsContainer.createEl('p', { 
-					text: `Error: ${error.message}`,
-					cls: 'mod-warning'
-				});
-			} finally {
-				runButton.disabled = false;
-				runButton.textContent = 'Find Similar';
-			}
+		// Search button
+		const searchButton = contentEl.createEl('button', { text: 'Search' });
+		searchButton.addClass('mod-cta');
+		searchButton.style.width = '100%';
+		searchButton.style.maxWidth = '100%';
+		searchButton.style.marginBottom = '12px';
+		searchButton.style.marginLeft = '0';
+		searchButton.style.marginRight = '0';
+		searchButton.style.padding = '6px';
+		searchButton.style.fontSize = '12px';
+		searchButton.style.boxSizing = 'border-box';
+		searchButton.style.overflow = 'hidden';
+
+		// Results container (scrollable)
+		this.resultsContainer = contentEl.createDiv();
+		this.resultsContainer.style.maxHeight = '300px';
+		this.resultsContainer.style.overflowY = 'auto';
+		this.resultsContainer.style.overflowX = 'hidden';
+		this.resultsContainer.style.marginBottom = '12px';
+		this.resultsContainer.style.marginLeft = '0';
+		this.resultsContainer.style.marginRight = '0';
+		this.resultsContainer.style.border = '1px solid var(--background-modifier-border)';
+		this.resultsContainer.style.borderRadius = '4px';
+		this.resultsContainer.style.padding = '6px';
+		this.resultsContainer.style.width = '100%';
+		this.resultsContainer.style.maxWidth = '100%';
+		this.resultsContainer.style.boxSizing = 'border-box';
+
+		// Search button handler
+		searchButton.onclick = async () => {
+			await this.performSearch();
 		};
 	}
 
-	private showFindNotesSimilarUI(mode: 'note' | 'selection' | 'combined') {
-		// Check if item has the required embedding based on mode
-		let hasRequiredEmbedding = false;
-		let errorMessage = '';
-		
-		if (mode === 'note') {
-			hasRequiredEmbedding = !!(this.item.embedding && Array.isArray(this.item.embedding) && this.item.embedding.length > 0);
-			errorMessage = 'This marginalia does not have a note embedding. Please ensure Ollama is available and embeddings are generated.';
-		} else if (mode === 'selection') {
-			hasRequiredEmbedding = !!(this.item.selectionEmbedding && Array.isArray(this.item.selectionEmbedding) && this.item.selectionEmbedding.length > 0);
-			errorMessage = 'This marginalia does not have a selection embedding. The selected text may be empty or embeddings may not be generated.';
-		} else if (mode === 'combined') {
-			// For combined, we need at least one of note or selection text
-			const hasNote = this.plugin.hasMeaningfulText(this.item.note);
-			const hasSelection = this.plugin.hasMeaningfulText(this.item.text);
-			hasRequiredEmbedding = hasNote || hasSelection;
-			errorMessage = 'This marginalia needs at least a note or selection text to generate a combined embedding.';
+	private async checkNoteHasEmbedding(): Promise<boolean> {
+		try {
+			const embeddings = await (this.plugin as any).loadEmbeddings();
+			const normalizedPath = (this.plugin as any).normalizePath(this.filePath);
+			return embeddings.some((e: any) => (this.plugin as any).normalizePath(e.source_path) === normalizedPath);
+		} catch (error) {
+			console.error('Error checking note embedding:', error);
+			return false;
 		}
-		
-		if (!hasRequiredEmbedding) {
-			this.functionContent.createEl('p', { 
-				text: errorMessage,
-				cls: 'mod-warning'
-			});
+	}
+
+	private async performSearch() {
+		const menu1 = this.menu1Select.value;
+		const menu2 = this.menu2Select.value;
+		const threshold = parseFloat(this.slider.value);
+
+		if (!menu1 || !menu2) {
+			new Notice('Please select both dropdown options');
 			return;
 		}
 
-		// Similarity threshold slider
-		const sliderContainer = this.functionContent.createDiv();
-		sliderContainer.style.marginBottom = '15px';
+		// Clear previous results
+		this.resultsContainer.empty();
+		this.resultsContainer.createEl('div', { text: 'Searching...' });
+
+		// Determine function type from menu selections
+		let functionType = '';
+		let searchMode: 'marginalia' | 'selection' | 'combined' | 'note' = 'marginalia';
 		
-		const label = sliderContainer.createEl('label');
-		label.textContent = 'Similarity Threshold: ';
-		label.style.display = 'block';
-		label.style.marginBottom = '5px';
-		
-		const sliderValue = sliderContainer.createSpan();
-		const defaultThreshold = this.plugin.settings.defaultSimilarity || 0.7;
-		sliderValue.textContent = defaultThreshold.toFixed(2);
-		sliderValue.style.marginLeft = '10px';
-		sliderValue.style.fontWeight = 'bold';
-		
-		const slider = sliderContainer.createEl('input', {
-			attr: {
-				type: 'range',
-				min: '0.5',
-				max: '1.0',
-				step: '0.05',
-				value: defaultThreshold.toString()
+		// Map menu2 to search mode
+		if (menu2 === 'this-marginalia') {
+			searchMode = 'marginalia';
+		} else if (menu2 === 'this-selection') {
+			searchMode = 'selection';
+		} else if (menu2 === 'this-combined') {
+			searchMode = 'combined';
+		} else if (menu2 === 'this-note') {
+			searchMode = 'note';
+		}
+
+		// Build function type string
+		if (menu1 === 'notes') {
+			if (searchMode === 'marginalia') {
+				functionType = 'notes-similar';
+			} else if (searchMode === 'selection') {
+				functionType = 'notes-similar-selection';
+			} else if (searchMode === 'combined') {
+				functionType = 'notes-similar-combined';
+			} else if (searchMode === 'note') {
+				functionType = 'notes-similar-note';
 			}
-		});
-		slider.style.width = '100%';
-		slider.oninput = (e) => {
-			const value = (e.target as HTMLInputElement).value;
-			sliderValue.textContent = parseFloat(value).toFixed(2);
-		};
+		} else {
+			if (searchMode === 'marginalia') {
+				functionType = 'similar';
+			} else if (searchMode === 'selection') {
+				functionType = 'similar-selection';
+			} else if (searchMode === 'combined') {
+				functionType = 'similar-combined';
+			}
+		}
 
-		// Run button
-		const runButton = this.functionContent.createEl('button', { text: 'Find Similar Notes' });
-		runButton.addClass('mod-cta');
-		runButton.style.width = '100%';
-		runButton.style.marginTop = '10px';
+		this.currentFunctionType = functionType;
 
-		// Results container
-		const resultsContainer = this.functionContent.createDiv();
-		resultsContainer.style.marginTop = '20px';
+		try {
+			let results: Array<{ item: MarginaliaItem; filePath: string; similarity: number }> = [];
+			let resultLabel = '';
 
-		runButton.onclick = async () => {
-			const threshold = parseFloat(slider.value);
-			runButton.disabled = true;
-			runButton.textContent = 'Searching...';
-			resultsContainer.empty();
-			
-			try {
-				let similarNotes: Array<{ filePath: string; similarity: number }>;
-				let resultLabel = '';
-				
-				if (mode === 'note') {
-					similarNotes = await this.plugin.findNotesSimilarToMarginalia(this.item, this.filePath, threshold);
-					resultLabel = 'similar notes (by marginalia)';
-				} else if (mode === 'selection') {
-					similarNotes = await this.plugin.findNotesSimilarToSelection(this.item, this.filePath, threshold);
-					resultLabel = 'similar notes (by selection)';
-				} else {
-					similarNotes = await this.plugin.findNotesSimilarToCombined(this.item, this.filePath, threshold);
-					resultLabel = 'similar notes (by combined)';
-				}
-				
-				// Store similar notes for use by export buttons
-				// Include the current note at the beginning with 100% similarity (it's the source)
-				const currentNoteEntry = {
-					item: { id: '', text: '', note: '', from: { line: 0, ch: 0 }, to: { line: 0, ch: 0 }, line: 0, ch: 0 } as MarginaliaItem,
-					filePath: this.filePath,
-					similarity: 1.0 // 100% similarity (it's the source note)
-				};
-				
-				this.currentSimilarItems = [
-					currentNoteEntry,
-					...similarNotes.map(note => ({
+			if (menu1 === 'notes') {
+				// Note-based search
+				if (searchMode === 'marginalia') {
+					const similarNotes = await this.plugin.findNotesSimilarToMarginalia(this.item, this.filePath, threshold);
+					results = similarNotes.map(note => ({
 						item: { id: '', text: '', note: '', from: { line: 0, ch: 0 }, to: { line: 0, ch: 0 }, line: 0, ch: 0 } as MarginaliaItem,
 						filePath: note.filePath,
 						similarity: note.similarity
-					}))
-				];
+					}));
+					resultLabel = 'similar notes (by marginalia)';
+				} else if (searchMode === 'selection') {
+					const similarNotes = await this.plugin.findNotesSimilarToSelection(this.item, this.filePath, threshold);
+					results = similarNotes.map(note => ({
+						item: { id: '', text: '', note: '', from: { line: 0, ch: 0 }, to: { line: 0, ch: 0 }, line: 0, ch: 0 } as MarginaliaItem,
+						filePath: note.filePath,
+						similarity: note.similarity
+					}));
+					resultLabel = 'similar notes (by selection)';
+				} else if (searchMode === 'combined') {
+					const similarNotes = await this.plugin.findNotesSimilarToCombined(this.item, this.filePath, threshold);
+					results = similarNotes.map(note => ({
+						item: { id: '', text: '', note: '', from: { line: 0, ch: 0 }, to: { line: 0, ch: 0 }, line: 0, ch: 0 } as MarginaliaItem,
+						filePath: note.filePath,
+						similarity: note.similarity
+					}));
+					resultLabel = 'similar notes (by combined)';
+				} else if (searchMode === 'note') {
+					// Find notes similar to this note (using note embedding)
+					const similarNotes = await this.findNotesSimilarToNote(threshold);
+					results = similarNotes.map(note => ({
+						item: { id: '', text: '', note: '', from: { line: 0, ch: 0 }, to: { line: 0, ch: 0 }, line: 0, ch: 0 } as MarginaliaItem,
+						filePath: note.filePath,
+						similarity: note.similarity
+					}));
+					resultLabel = 'similar notes (by note content)';
+				}
+			} else {
+				// Marginalia-based search
+				if (searchMode === 'marginalia') {
+					results = await this.plugin.findSimilarMarginalia(this.item, threshold);
+					resultLabel = 'similar marginalia (by note)';
+				} else if (searchMode === 'selection') {
+					results = await this.plugin.findSimilarSelection(this.item, threshold);
+					resultLabel = 'similar selections';
+				} else if (searchMode === 'combined') {
+					results = await this.plugin.findSimilarCombined(this.item, threshold);
+					resultLabel = 'similar combined (note + selection)';
+				}
+			}
+
+			// Store results
+			this.currentSimilarItems = results;
+
+			// Display results
+			this.resultsContainer.empty();
+			
+			if (results.length === 0) {
+				this.resultsContainer.createEl('p', { text: `No ${resultLabel} found above the threshold.` });
+			} else {
+				this.resultsContainer.createEl('h3', { text: `Found ${results.length} ${resultLabel}:` });
 				
-				if (this.currentSimilarItems.length === 0) {
-					resultsContainer.createEl('p', { text: `No ${resultLabel} found above the threshold.` });
-				} else {
-					// Count similar notes (excluding the current note)
-					const similarCount = this.currentSimilarItems.length - 1;
-					const totalCount = this.currentSimilarItems.length;
-					resultsContainer.createEl('h3', { text: `Found ${totalCount} ${resultLabel} (${similarCount} similar + 1 current):` });
+				const list = this.resultsContainer.createEl('ul');
+				list.style.listStyle = 'none';
+				list.style.padding = '0';
+				
+				for (const result of results) {
+					const li = list.createEl('li');
+					li.style.marginBottom = '10px';
+					li.style.padding = '8px';
+					li.style.border = '1px solid var(--background-modifier-border)';
+					li.style.borderRadius = '4px';
 					
-					const list = resultsContainer.createEl('ul');
-					list.style.listStyle = 'none';
-					list.style.padding = '0';
-					
-					for (const note of this.currentSimilarItems) {
-						const li = list.createEl('li');
-						li.style.marginBottom = '10px';
-						li.style.padding = '8px';
-						li.style.border = '1px solid var(--background-modifier-border)';
-						li.style.borderRadius = '4px';
-						
-						const link = li.createEl('a', { text: note.filePath });
-						link.style.cursor = 'pointer';
-						link.style.textDecoration = 'underline';
-						link.style.color = 'var(--text-accent)';
-						link.onclick = async () => {
-							const file = this.app.vault.getAbstractFileByPath(note.filePath);
-							if (file instanceof TFile) {
-								await this.app.workspace.openLinkText(note.filePath, '', true);
-								this.close();
-							}
-						};
-						
-						li.createEl('br');
-						const similarity = li.createSpan();
-						if (note.filePath === this.filePath) {
-							similarity.textContent = `(Current Note)`;
-							similarity.style.fontSize = '0.85em';
-							similarity.style.color = 'var(--text-accent)';
-							similarity.style.fontWeight = 'bold';
+					const link = li.createEl('a', { text: result.filePath });
+					link.style.cursor = 'pointer';
+					link.style.textDecoration = 'underline';
+					link.style.color = 'var(--text-accent)';
+					link.onclick = async () => {
+						if (result.item.id) {
+							// Marginalia result - jump to marginalia
+							this.plugin.jumpToMarginalia(result.filePath, result.item.id);
 						} else {
-							similarity.textContent = `Similarity: ${(note.similarity * 100).toFixed(1)}%`;
-							similarity.style.fontSize = '0.85em';
-							similarity.style.color = 'var(--text-muted)';
+							// Note result - open note
+							const file = this.app.vault.getAbstractFileByPath(result.filePath);
+							if (file instanceof TFile) {
+								await this.app.workspace.openLinkText(result.filePath, '', true);
+							}
 						}
+						this.close();
+					};
+					
+					// Show marginalia/selection text if available
+					if (result.item.id && (result.item.note || result.item.text)) {
+						li.createEl('br');
+						const preview = li.createSpan();
+						preview.textContent = result.item.note || result.item.text || 'No text';
+						preview.style.fontSize = '0.9em';
+						preview.style.color = 'var(--text-muted)';
 					}
 					
-					// Add filename input section with buttons inside
-					const filenameContainer = resultsContainer.createDiv();
-					filenameContainer.style.marginTop = '20px';
-					filenameContainer.style.marginBottom = '20px';
-					filenameContainer.style.padding = '15px';
-					filenameContainer.style.backgroundColor = 'var(--background-secondary)';
-					filenameContainer.style.borderRadius = '4px';
-					filenameContainer.style.border = '1px solid var(--background-modifier-border)';
-					
-					const filenameLabel = filenameContainer.createEl('label');
-					filenameLabel.textContent = 'Export file name:';
-					filenameLabel.style.display = 'block';
-					filenameLabel.style.marginBottom = '8px';
-					filenameLabel.style.fontWeight = '500';
-					
-					const filenameInputContainer = filenameContainer.createDiv();
-					filenameInputContainer.style.display = 'flex';
-					filenameInputContainer.style.gap = '8px';
-					filenameInputContainer.style.alignItems = 'center';
-					filenameInputContainer.style.marginBottom = '15px';
-					
-					const filenameInput = filenameInputContainer.createEl('input', {
-						attr: {
-							type: 'text',
-							placeholder: 'Enter filename...'
-						}
-					});
-					filenameInput.style.flex = '1';
-					filenameInput.style.padding = '6px 10px';
-					filenameInput.style.border = '1px solid var(--background-modifier-border)';
-					filenameInput.style.borderRadius = '4px';
-					filenameInput.style.fontSize = '0.9em';
-					
-					const regenerateButton = filenameInputContainer.createEl('button', { text: 'Regenerate Name' });
-					regenerateButton.style.padding = '6px 12px';
-					regenerateButton.style.border = '1px solid var(--background-modifier-border)';
-					regenerateButton.style.borderRadius = '4px';
-					regenerateButton.style.background = 'var(--background-primary)';
-					regenerateButton.style.cursor = 'pointer';
-					regenerateButton.style.fontSize = '0.9em';
-					regenerateButton.style.whiteSpace = 'nowrap';
-					
-					// Generate initial AI suggestion
-					let currentFileName = '';
-					const generateFileName = async () => {
-						regenerateButton.disabled = true;
-						regenerateButton.textContent = 'Generating...';
-						try {
-							const suggestedName = await this.generateAITitle('TOC');
-							currentFileName = suggestedName;
-							filenameInput.value = suggestedName;
-						} catch (error) {
-							const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
-							currentFileName = `Marginalia ${timestamp}`;
-							filenameInput.value = currentFileName;
-						}
-						regenerateButton.disabled = false;
-						regenerateButton.textContent = 'Regenerate Name';
-					};
-					
-					regenerateButton.onclick = generateFileName;
-					
-					// Update currentFileName when user types
-					filenameInput.oninput = () => {
-						currentFileName = filenameInput.value.trim();
-					};
-					
-					// Generate initial suggestion
-					await generateFileName();
-					
-					// Add action buttons inside the filename container
-					const buttonContainer = filenameContainer.createDiv();
-					buttonContainer.style.display = 'flex';
-					buttonContainer.style.gap = '10px';
-					
-					const tocButtonContainer = buttonContainer.createDiv();
-					tocButtonContainer.style.display = 'flex';
-					tocButtonContainer.style.alignItems = 'center';
-					tocButtonContainer.style.gap = '8px';
-					tocButtonContainer.style.flex = '1';
-					
-					const tocButton = tocButtonContainer.createEl('button', { text: 'Create Table of Contents Note' });
-					tocButton.addClass('mod-cta');
-					tocButton.style.flex = '1';
-					
-					const tocProgress = tocButtonContainer.createSpan();
-					tocProgress.style.display = 'none';
-					tocProgress.style.width = '16px';
-					tocProgress.style.height = '16px';
-					tocProgress.style.border = '2px solid var(--text-muted)';
-					tocProgress.style.borderTop = '2px solid var(--text-accent)';
-					tocProgress.style.borderRadius = '50%';
-					tocProgress.style.animation = 'spin 1s linear infinite';
-					
-					tocButton.onclick = async () => {
-						const fileName = filenameInput.value.trim() || currentFileName || 'Marginalia TOC';
-						if (!fileName) {
-							new Notice('Please enter a filename');
-							return;
-						}
-						tocButton.disabled = true;
-						tocButton.style.opacity = '0.6';
-						tocProgress.style.display = 'block';
-						try {
-							await this.createTableOfContents(fileName);
-						} finally {
-							tocButton.disabled = false;
-							tocButton.style.opacity = '1';
-							tocProgress.style.display = 'none';
-						}
-					};
-					
-					const canvasButtonContainer = buttonContainer.createDiv();
-					canvasButtonContainer.style.display = 'flex';
-					canvasButtonContainer.style.alignItems = 'center';
-					canvasButtonContainer.style.gap = '8px';
-					canvasButtonContainer.style.flex = '1';
-					
-					const canvasButton = canvasButtonContainer.createEl('button', { text: 'Create Canvas' });
-					canvasButton.addClass('mod-cta');
-					canvasButton.style.flex = '1';
-					
-					const canvasProgress = canvasButtonContainer.createSpan();
-					canvasProgress.style.display = 'none';
-					canvasProgress.style.width = '16px';
-					canvasProgress.style.height = '16px';
-					canvasProgress.style.border = '2px solid var(--text-muted)';
-					canvasProgress.style.borderTop = '2px solid var(--text-accent)';
-					canvasProgress.style.borderRadius = '50%';
-					canvasProgress.style.animation = 'spin 1s linear infinite';
-					
-					canvasButton.onclick = async () => {
-						const fileName = filenameInput.value.trim() || currentFileName || 'Marginalia Canvas';
-						if (!fileName) {
-							new Notice('Please enter a filename');
-							return;
-						}
-						canvasButton.disabled = true;
-						canvasButton.style.opacity = '0.6';
-						canvasProgress.style.display = 'block';
-						try {
-							await this.createCanvas(fileName);
-						} finally {
-							canvasButton.disabled = false;
-							canvasButton.style.opacity = '1';
-							canvasProgress.style.display = 'none';
-						}
-					};
+					li.createEl('br');
+					const similarity = li.createSpan();
+					similarity.textContent = `Similarity: ${(result.similarity * 100).toFixed(1)}%`;
+					similarity.style.fontSize = '0.85em';
+					similarity.style.color = 'var(--text-muted)';
 				}
-			} catch (error: any) {
-				resultsContainer.createEl('p', { 
-					text: `Error: ${error.message}`,
-					cls: 'mod-warning'
-				});
+
+				// Add export buttons below results
+				this.addExportButtons();
+			}
+		} catch (error: any) {
+			this.resultsContainer.empty();
+			this.resultsContainer.createEl('p', { 
+				text: `Error: ${error.message}`,
+				cls: 'mod-warning'
+			});
+		}
+	}
+
+	private async findNotesSimilarToNote(threshold: number): Promise<Array<{ filePath: string; similarity: number }>> {
+		const embeddings = await (this.plugin as any).loadEmbeddings();
+		const normalizedCurrentPath = (this.plugin as any).normalizePath(this.filePath);
+		
+		// Find current note's embedding
+		const currentNoteEmbedding = embeddings.find((e: any) => 
+			(this.plugin as any).normalizePath(e.source_path) === normalizedCurrentPath
+		);
+
+		if (!currentNoteEmbedding || !currentNoteEmbedding.chunks || currentNoteEmbedding.chunks.length === 0) {
+			throw new Error('Current note does not have embeddings');
+		}
+
+		// Use the first chunk as the reference (or average all chunks)
+		const currentEmbedding = currentNoteEmbedding.chunks[0].vector;
+		
+		const results = new Map<string, number>();
+
+		for (const noteEmbedding of embeddings) {
+			const normalizedPath = (this.plugin as any).normalizePath(noteEmbedding.source_path);
+			if (normalizedPath === normalizedCurrentPath) {
+				continue; // Skip current note
+			}
+
+			let bestSimilarity = 0;
+			for (const chunk of noteEmbedding.chunks) {
+				const similarity = (this.plugin as any).cosineSimilarity(currentEmbedding, chunk.vector);
+				if (similarity > bestSimilarity) {
+					bestSimilarity = similarity;
+				}
+			}
+
+			if (bestSimilarity >= threshold) {
+				const existingSimilarity = results.get(noteEmbedding.source_path);
+				if (!existingSimilarity || bestSimilarity > existingSimilarity) {
+					results.set(noteEmbedding.source_path, bestSimilarity);
+				}
+			}
+		}
+
+		const resultArray = Array.from(results.entries()).map(([filePath, similarity]) => ({
+			filePath,
+			similarity
+		}));
+
+		resultArray.sort((a, b) => b.similarity - a.similarity);
+		return resultArray;
+	}
+
+	private addExportButtons() {
+		// Remove existing export section if it exists
+		if (this.exportSection) {
+			this.exportSection.remove();
+			this.exportSection = null;
+		}
+
+		// Create export section below results container
+		this.exportSection = this.contentEl.createDiv();
+		const exportSection = this.exportSection;
+		exportSection.style.marginTop = '12px';
+		exportSection.style.marginLeft = '0';
+		exportSection.style.marginRight = '0';
+		exportSection.style.padding = '8px';
+		exportSection.style.backgroundColor = 'var(--background-secondary)';
+		exportSection.style.borderRadius = '4px';
+		exportSection.style.border = '1px solid var(--background-modifier-border)';
+		exportSection.style.width = '100%';
+		exportSection.style.maxWidth = '100%';
+		exportSection.style.boxSizing = 'border-box';
+		exportSection.style.overflow = 'hidden';
+
+		const filenameLabel = exportSection.createEl('label');
+		filenameLabel.textContent = 'Export file name:';
+		filenameLabel.style.display = 'block';
+		filenameLabel.style.marginBottom = '8px';
+		filenameLabel.style.fontWeight = '500';
+
+		const filenameInputContainer = exportSection.createDiv();
+		filenameInputContainer.style.display = 'flex';
+		filenameInputContainer.style.gap = '8px';
+		filenameInputContainer.style.alignItems = 'center';
+		filenameInputContainer.style.marginBottom = '15px';
+
+		const filenameInput = filenameInputContainer.createEl('input', {
+			attr: {
+				type: 'text',
+				placeholder: 'Enter filename...'
+			}
+		});
+		filenameInput.style.flex = '1';
+		filenameInput.style.minWidth = '0';
+		filenameInput.style.padding = '6px 10px';
+		filenameInput.style.border = '1px solid var(--background-modifier-border)';
+		filenameInput.style.borderRadius = '4px';
+		filenameInput.style.fontSize = '0.9em';
+		filenameInput.style.boxSizing = 'border-box';
+
+		const regenerateButton = filenameInputContainer.createEl('button', { text: 'Regenerate Name' });
+		regenerateButton.style.padding = '6px 12px';
+		regenerateButton.style.border = '1px solid var(--background-modifier-border)';
+		regenerateButton.style.borderRadius = '4px';
+		regenerateButton.style.background = 'var(--background-primary)';
+		regenerateButton.style.cursor = 'pointer';
+		regenerateButton.style.fontSize = '0.9em';
+		regenerateButton.style.whiteSpace = 'nowrap';
+
+		let currentFileName = '';
+		const generateFileName = async () => {
+			regenerateButton.disabled = true;
+			regenerateButton.textContent = 'Generating...';
+			try {
+				const suggestedName = await this.generateAITitle('TOC');
+				currentFileName = suggestedName;
+				filenameInput.value = suggestedName;
+			} catch (error) {
+				const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+				currentFileName = `Marginalia ${timestamp}`;
+				filenameInput.value = currentFileName;
+			}
+			regenerateButton.disabled = false;
+			regenerateButton.textContent = 'Regenerate Name';
+		};
+
+		regenerateButton.onclick = generateFileName;
+		filenameInput.oninput = () => {
+			currentFileName = filenameInput.value.trim();
+		};
+
+		// Generate initial suggestion
+		generateFileName();
+
+		// Add action buttons
+		const buttonContainer = exportSection.createDiv();
+		buttonContainer.style.display = 'flex';
+		buttonContainer.style.gap = '8px';
+		buttonContainer.style.width = '100%';
+		buttonContainer.style.boxSizing = 'border-box';
+		buttonContainer.style.overflow = 'hidden';
+
+		const tocButtonContainer = buttonContainer.createDiv();
+		tocButtonContainer.style.display = 'flex';
+		tocButtonContainer.style.alignItems = 'center';
+		tocButtonContainer.style.gap = '6px';
+		tocButtonContainer.style.flex = '1 1 0';
+		tocButtonContainer.style.minWidth = '0';
+
+		const tocButton = tocButtonContainer.createEl('button', { text: 'Create Table of Contents Note' });
+		tocButton.addClass('mod-cta');
+		tocButton.style.flex = '1 1 0';
+		tocButton.style.minWidth = '0';
+		tocButton.style.boxSizing = 'border-box';
+		tocButton.style.overflow = 'hidden';
+		tocButton.style.textOverflow = 'ellipsis';
+		tocButton.style.whiteSpace = 'nowrap';
+
+		const tocProgress = tocButtonContainer.createSpan();
+		tocProgress.style.display = 'none';
+		tocProgress.style.width = '16px';
+		tocProgress.style.height = '16px';
+		tocProgress.style.border = '2px solid var(--text-muted)';
+		tocProgress.style.borderTop = '2px solid var(--text-accent)';
+		tocProgress.style.borderRadius = '50%';
+		tocProgress.style.animation = 'spin 1s linear infinite';
+
+		tocButton.onclick = async () => {
+			const fileName = filenameInput.value.trim() || currentFileName || 'Marginalia TOC';
+			if (!fileName) {
+				new Notice('Please enter a filename');
+				return;
+			}
+			tocButton.disabled = true;
+			tocButton.style.opacity = '0.6';
+			tocProgress.style.display = 'block';
+			try {
+				await this.createTableOfContents(fileName);
 			} finally {
-				runButton.disabled = false;
-				runButton.textContent = 'Find Similar Notes';
+				tocButton.disabled = false;
+				tocButton.style.opacity = '1';
+				tocProgress.style.display = 'none';
+			}
+		};
+
+		const canvasButtonContainer = buttonContainer.createDiv();
+		canvasButtonContainer.style.display = 'flex';
+		canvasButtonContainer.style.alignItems = 'center';
+		canvasButtonContainer.style.gap = '6px';
+		canvasButtonContainer.style.flex = '1 1 0';
+		canvasButtonContainer.style.minWidth = '0';
+
+		const canvasButton = canvasButtonContainer.createEl('button', { text: 'Create Canvas' });
+		canvasButton.addClass('mod-cta');
+		canvasButton.style.flex = '1 1 0';
+		canvasButton.style.minWidth = '0';
+		canvasButton.style.boxSizing = 'border-box';
+		canvasButton.style.overflow = 'hidden';
+		canvasButton.style.textOverflow = 'ellipsis';
+		canvasButton.style.whiteSpace = 'nowrap';
+
+		const canvasProgress = canvasButtonContainer.createSpan();
+		canvasProgress.style.display = 'none';
+		canvasProgress.style.width = '16px';
+		canvasProgress.style.height = '16px';
+		canvasProgress.style.border = '2px solid var(--text-muted)';
+		canvasProgress.style.borderTop = '2px solid var(--text-accent)';
+		canvasProgress.style.borderRadius = '50%';
+		canvasProgress.style.animation = 'spin 1s linear infinite';
+
+		canvasButton.onclick = async () => {
+			const fileName = filenameInput.value.trim() || currentFileName || 'Marginalia Canvas';
+			if (!fileName) {
+				new Notice('Please enter a filename');
+				return;
+			}
+			canvasButton.disabled = true;
+			canvasButton.style.opacity = '0.6';
+			canvasProgress.style.display = 'block';
+			try {
+				await this.createCanvas(fileName);
+			} finally {
+				canvasButton.disabled = false;
+				canvasButton.style.opacity = '1';
+				canvasProgress.style.display = 'none';
 			}
 		};
 	}
+
+	private getFunctionDisplayName(functionType: string): string {
+		const menu1 = this.menu1Select?.value || '';
+		const menu2 = this.menu2Select?.value || '';
+		
+		if (!menu1 || !menu2) {
+			return 'Unknown Function';
+		}
+
+		const menu1Text = this.menu1Select?.options[this.menu1Select.selectedIndex]?.text || menu1;
+		const menu2Text = this.menu2Select?.options[this.menu2Select.selectedIndex]?.text || menu2;
+		
+		return `Find ${menu1Text} that are similar to ${menu2Text}`;
+	}
+
 
 	private async generateAITitle(fileType: 'TOC' | 'Canvas'): Promise<string> {
 		// Check if Ollama is available
@@ -2027,6 +2001,7 @@ ${allText}`;
 		const { contentEl } = this;
 		contentEl.empty();
 		this.currentSimilarItems = [];
+		this.exportSection = null;
 	}
 }
 
@@ -2035,13 +2010,16 @@ export class EditMarginaliaModal extends Modal {
 	private onSubmit: (note: string, color?: string) => void;
 	private onDelete?: () => void;
 	private defaultColor: string;
+	private plugin: MarginaliaPlugin;
 
-	constructor(app: any, item: MarginaliaItem, defaultColor: string, onSubmit: (note: string, color?: string) => void, onDelete?: () => void) {
+	constructor(app: any, item: MarginaliaItem, defaultColor: string, onSubmit: (note: string, color?: string) => void, onDelete?: () => void, plugin?: MarginaliaPlugin) {
 		super(app);
 		this.item = item;
 		this.onSubmit = onSubmit;
 		this.onDelete = onDelete;
 		this.defaultColor = defaultColor;
+		// Get plugin instance from app if not provided
+		this.plugin = plugin || (app.plugins.plugins['marginalia'] as MarginaliaPlugin);
 	}
 
 	onOpen() {
@@ -2103,6 +2081,43 @@ export class EditMarginaliaModal extends Modal {
 				target.value = target.value.substring(0, MAX_CHARS);
 			}
 			updateCounter();
+		});
+
+		// Hidden feature: detect "/ghost" and generate monk-style marginalia
+		input.addEventListener('keydown', async (e: KeyboardEvent) => {
+			const target = e.target as HTMLTextAreaElement;
+			const value = target.value;
+			
+			// Check if user typed "/ghost" (case-insensitive)
+			if (value.toLowerCase().includes('/ghost')) {
+				e.preventDefault();
+				
+				// Show loading state
+				const originalValue = target.value;
+				target.value = 'Summoning the ghost of the scribe...';
+				target.disabled = true;
+				
+				try {
+					const monkText = await this.plugin.generateMonkMarginalia(this.item.text || '');
+					if (monkText) {
+						target.value = monkText;
+						updateCounter();
+					} else {
+						target.value = originalValue;
+						// Show error notice
+						const notice = new (this.app as any).Notice('Failed to generate monk marginalia. Check Ollama connection.');
+						setTimeout(() => notice.hide(), 3000);
+					}
+				} catch (error) {
+					console.error('Error generating monk marginalia:', error);
+					target.value = originalValue;
+					const notice = new (this.app as any).Notice('Error generating monk marginalia.');
+					setTimeout(() => notice.hide(), 3000);
+				} finally {
+					target.disabled = false;
+					target.focus();
+				}
+			}
 		});
 
 		// Initialize counter

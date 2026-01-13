@@ -337,20 +337,21 @@
 }
 
 .marginalia-ai-modal .modal-content {
-	min-width: 450px !important;
+	min-width: 800px !important;
+	max-width: 800px !important;
+	width: 800px !important;
 	min-height: 500px !important;
 	max-height: 80vh !important;
-	overflow: visible !important;
+	overflow: hidden !important;
+	box-sizing: border-box !important;
+	padding: 0 !important;
+	margin: 0 !important;
 }
 
 .marginalia-ai-modal select {
-	min-width: 400px !important;
-	width: 100% !important;
 	max-height: none !important;
 	height: auto !important;
 	overflow: visible !important;
-	padding: 8px !important;
-	font-size: 14px !important;
 }
 
 .marginalia-ai-modal select option {

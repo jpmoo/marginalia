@@ -1,7 +1,7 @@
 {
 	"id": "marginalia",
 	"name": "Marginalia",
-	"version": "Beta03",
+	"version": "Beta04",
 	"minAppVersion": "0.15.0",
 	"description": "Add margin notes to your Obsidian notes with highlights and hover tooltips",
 	"author": "JPMoo",

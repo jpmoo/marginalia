@@ -38,6 +38,7 @@ export interface MarginaliaSettings {
 	defaultSimilarity: number; // Default similarity threshold for AI functions (0.5 to 1.0)
 	embeddingOn: boolean; // Whether note embedding is active
 	similarityFolders: string; // Folders to include in similarity analysis (comma-separated)
+	maxChunkSize: number; // Maximum size of note before forcing chunking (1000-7000)
 }
 
 const DEFAULT_SETTINGS: MarginaliaSettings = {
@@ -54,7 +55,8 @@ const DEFAULT_SETTINGS: MarginaliaSettings = {
 	sortOrder: 'position',
 	defaultSimilarity: 0.60, // Default similarity threshold for AI functions
 	embeddingOn: false, // Note embedding starts as inactive
-	similarityFolders: '' // Empty by default, user specifies folders
+	similarityFolders: '', // Empty by default, user specifies folders
+	maxChunkSize: 1800 // Default maximum chunk size before forcing chunking
 };
 
 export default class MarginaliaPlugin extends Plugin {
@@ -150,6 +152,12 @@ export default class MarginaliaPlugin extends Plugin {
 		if (loadedSettings && loadedSettings.similarityFolders !== undefined) {
 			if (typeof loadedSettings.similarityFolders !== 'string') {
 				this.settings.similarityFolders = DEFAULT_SETTINGS.similarityFolders;
+			}
+		}
+
+		if (loadedSettings && loadedSettings.maxChunkSize !== undefined) {
+			if (typeof loadedSettings.maxChunkSize !== 'number' || loadedSettings.maxChunkSize < 1000 || loadedSettings.maxChunkSize > 7000) {
+				this.settings.maxChunkSize = DEFAULT_SETTINGS.maxChunkSize;
 			}
 		}
 		
@@ -338,7 +346,7 @@ export default class MarginaliaPlugin extends Plugin {
 					color: color
 				});
 			}
-		}, text);
+		}, text, this);
 
 		modal.open();
 	}
@@ -641,7 +649,7 @@ export default class MarginaliaPlugin extends Plugin {
 					await this.deleteMarginalia(filePath, item.id);
 				});
 				deleteModal.open();
-			});
+			}, this);
 			modal.open();
 		}
 	}
@@ -766,7 +774,7 @@ export default class MarginaliaPlugin extends Plugin {
 		return `${this.app.vault.configDir}/plugins/marginalia/marginalia.json`;
 	}
 
-	private getEmbeddingFilePath(): string {
+	public getEmbeddingFilePath(): string {
 		return `${this.app.vault.configDir}/plugins/marginalia/notes_embedding.json`;
 	}
 
@@ -905,8 +913,81 @@ export default class MarginaliaPlugin extends Plugin {
 			})
 		);
 
+		// Periodically check for files that need embedding (catches files added from outside Obsidian)
+		// Check every 5 minutes
+		const checkInterval = setInterval(async () => {
+			if (!this.settings.embeddingOn || !this.settings.ollamaAvailable) {
+				return;
+			}
+			
+			try {
+				await this.checkAndQueueFilesNeedingEmbedding();
+			} catch (error) {
+				console.error('Error in periodic embedding check:', error);
+			}
+		}, 5 * 60 * 1000); // 5 minutes
+
+		// Store interval ID so we can clear it if needed
+		(this as any).embeddingCheckInterval = checkInterval;
+
 		this.embeddingListenersRegistered = true;
-		console.log('Embedding file system listeners registered');
+		console.log('Embedding file system listeners registered (including periodic check)');
+	}
+	
+	/**
+	 * Check for files that need embedding and queue them for processing
+	 * This catches files added from outside Obsidian or files that were missed
+	 */
+	private async checkAndQueueFilesNeedingEmbedding(): Promise<void> {
+		if (!this.settings.embeddingOn || !this.settings.ollamaAvailable) {
+			return;
+		}
+		
+		try {
+			// Load existing embeddings to check what's already done
+			const embeddings = await this.loadEmbeddings();
+			const allFiles = this.app.vault.getMarkdownFiles();
+			
+			// Find files in similarity folders that need processing
+			const filesToQueue: string[] = [];
+			
+			for (const file of allFiles) {
+				if (!this.isFileInSimilarityFolders(file.path)) {
+					continue;
+				}
+				
+				const filePath = this.normalizePath(file.path);
+				const existingEmbedding = embeddings.find(e => this.normalizePath(e.source_path) === filePath);
+				
+				// File needs processing if no embedding exists
+				if (!existingEmbedding) {
+					filesToQueue.push(file.path);
+					continue;
+				}
+				
+				// Check if file was modified after embedding
+				try {
+					const fileStat = await this.app.vault.adapter.stat(file.path);
+					if (fileStat && new Date(fileStat.mtime) > new Date(existingEmbedding.noteEdited)) {
+						filesToQueue.push(file.path);
+					}
+				} catch (error) {
+					// If we can't check the stat, skip it (don't queue to avoid duplicates)
+					continue;
+				}
+			}
+			
+			if (filesToQueue.length > 0) {
+				console.log(`Periodic check: Found ${filesToQueue.length} file(s) that need embedding`);
+				for (const filePath of filesToQueue) {
+					this.queueFileForEmbedding(filePath);
+				}
+				// Process the queue (it will handle debouncing internally)
+				this.processEmbeddingQueue();
+			}
+		} catch (error) {
+			console.error('Error in periodic embedding check:', error);
+		}
 	}
 
 	/**
@@ -940,11 +1021,10 @@ export default class MarginaliaPlugin extends Plugin {
 	/**
 	 * Process a single folder for embedding
 	 */
-	private async processFolderForEmbedding(folderPath: string): Promise<void> {
+		private async processFolderForEmbedding(folderPath: string): Promise<void> {
 		try {
 			// Always use file-based approach (same as listener) - more reliable than folder objects
-			// Use the same matching logic as isFileInSimilarityFolders
-			const normalizedPath = this.normalizePath(folderPath);
+			// Use the same matching logic as isFileInSimilarityFolders to ensure consistency
 			
 			// Wait for vault to be ready (retry if no files found initially)
 			let allFiles = this.app.vault.getMarkdownFiles();
@@ -958,12 +1038,15 @@ export default class MarginaliaPlugin extends Plugin {
 				console.log(`Found ${allFiles.length} total markdown file(s) in vault`);
 			}
 			
+			// Use the same filtering logic as the listener (isFileInSimilarityFolders)
+			// This ensures both paths use identical rules
 			const mdFiles = allFiles.filter(file => {
-				return file.path === folderPath || file.path.startsWith(folderPath + '/');
+				// Check if file is in any of the similarity folders (same logic as listener)
+				return this.isFileInSimilarityFolders(file.path);
 			});
 			
 			if (mdFiles.length > 0) {
-				console.log(`Found ${mdFiles.length} markdown file(s) matching folder path: "${folderPath}"`);
+				console.log(`Found ${mdFiles.length} markdown file(s) matching similarity folders`);
 				console.log(`Sample matching files:`, mdFiles.slice(0, 5).map(f => f.path));
 				for (const file of mdFiles) {
 					if (!this.settings.embeddingOn) {
@@ -971,53 +1054,13 @@ export default class MarginaliaPlugin extends Plugin {
 					}
 					await this.processFileForEmbedding(file);
 				}
-				console.log(`Completed processing files for folder path: ${folderPath}`);
-				return;
-			}
-			
-			// Try with normalized path as fallback
-			const mdFilesNormalized = allFiles.filter(file => {
-				const normalizedFilePath = this.normalizePath(file.path);
-				return normalizedFilePath === normalizedPath || normalizedFilePath.startsWith(normalizedPath + '/');
-			});
-			
-			if (mdFilesNormalized.length > 0) {
-				console.log(`Found ${mdFilesNormalized.length} markdown file(s) matching normalized folder path: "${normalizedPath}"`);
-				console.log(`Sample matching files:`, mdFilesNormalized.slice(0, 5).map(f => f.path));
-				for (const file of mdFilesNormalized) {
-					if (!this.settings.embeddingOn) {
-						return;
-					}
-					await this.processFileForEmbedding(file);
-				}
-				console.log(`Completed processing files for normalized folder path: ${normalizedPath}`);
+				console.log(`Completed processing files for similarity folders`);
 				return;
 			}
 			
 			// If still no files found, log debugging information
-			console.error(`No files found matching folder path: "${folderPath}" (also tried: "${normalizedPath}")`);
-			console.error(`Searched ${allFiles.length} total markdown file(s) in vault`);
-			// List some available folders and sample file paths for debugging
-			const allFolders = this.app.vault.getAllFolders();
-			if (allFolders.length > 0) {
-				console.error(`Available folders in vault (first 20):`, 
-					allFolders.slice(0, 20).map(f => f.path));
-			}
-			// Show some sample file paths that might match
-			const sampleFiles = allFiles.slice(0, 10);
-			if (sampleFiles.length > 0) {
-				console.error(`Sample file paths in vault:`, sampleFiles.map(f => f.path));
-				// Show files that start with similar names
-				const similarFiles = allFiles.filter(f => 
-					f.path.toLowerCase().includes(folderPath.toLowerCase()) || 
-					f.path.toLowerCase().includes(normalizedPath.toLowerCase())
-				).slice(0, 5);
-				if (similarFiles.length > 0) {
-					console.error(`Files with similar names:`, similarFiles.map(f => f.path));
-				}
-			} else {
-				console.error(`No markdown files found in vault at all - vault may not be ready yet`);
-			}
+			console.log(`No files found matching similarity folders`);
+			console.log(`Searched ${allFiles.length} total markdown file(s) in vault`);
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : String(error);
 			const errorStack = error instanceof Error ? error.stack : undefined;
@@ -1094,10 +1137,10 @@ export default class MarginaliaPlugin extends Plugin {
 			// Read file content
 			const content = await this.app.vault.read(file);
 			
-			// Clean content (remove frontmatter, links, etc.)
-			const cleanedContent = this.cleanMarkdownForEmbedding(content);
+			// Sanitize content (remove frontmatter, links, tags, etc.) and get position mapping
+			const { sanitizedText, positionMap } = this.sanitizeMarkdownForEmbedding(content);
 			
-			if (cleanedContent.length === 0) {
+			if (sanitizedText.length === 0) {
 				return; // No meaningful content
 			}
 
@@ -1106,18 +1149,19 @@ export default class MarginaliaPlugin extends Plugin {
 				return; // Stop processing if embedding was paused
 			}
 
-			// Check if file needs chunking (>7000 characters)
+			// Check if file needs chunking (based on maxChunkSize setting) - use sanitized text length
+			const maxChunkSize = this.settings.maxChunkSize || 1800;
 			let chunks: Array<{ char_start: number; char_end: number }> = [];
 			
-			if (cleanedContent.length > 7000) {
-				console.log(`Note longer than 7000 characters found: ${filePath} (${cleanedContent.length} characters)`);
+			if (sanitizedText.length > maxChunkSize) {
+				console.log(`Note longer than ${maxChunkSize} characters found: ${filePath} (${sanitizedText.length} characters after sanitization)`);
 				// Check again before sending qwen2.5:3b-instruct query
 				if (!this.settings.embeddingOn) {
 					return; // Stop if embedding was paused
 				}
-				// Use qwen2.5:3b-instruct to chunk the file
+				// Use qwen2.5:3b-instruct to chunk the file (using sanitized text)
 				try {
-					chunks = await this.chunkFileWithQwen(cleanedContent, filePath);
+					chunks = await this.chunkFileWithQwen(sanitizedText, filePath, maxChunkSize);
 					console.log(`File ${filePath} chunked into ${chunks.length} chunks:`, chunks);
 					// Reset retry count on success
 					this.embeddingRetryCount.delete(filePath);
@@ -1143,8 +1187,8 @@ export default class MarginaliaPlugin extends Plugin {
 					}
 				}
 			} else {
-				// Single chunk - entire file
-				chunks = [{ char_start: 0, char_end: cleanedContent.length }];
+				// Single chunk - entire file (using sanitized text length)
+				chunks = [{ char_start: 0, char_end: sanitizedText.length }];
 			}
 
 			// Check if embedding was paused before generating embeddings
@@ -1152,7 +1196,7 @@ export default class MarginaliaPlugin extends Plugin {
 				return; // Stop processing if embedding was paused
 			}
 
-			// Generate embeddings for each chunk
+			// Generate embeddings for each chunk (using sanitized text)
 			const embeddingChunks: NoteEmbeddingChunk[] = [];
 			for (let i = 0; i < chunks.length; i++) {
 				const chunk = chunks[i];
@@ -1160,7 +1204,8 @@ export default class MarginaliaPlugin extends Plugin {
 				if (!this.settings.embeddingOn) {
 					return; // Stop processing if embedding was paused (current chunk can complete, but no new chunks)
 				}
-				const chunkText = cleanedContent.substring(chunk.char_start, chunk.char_end);
+				// Extract chunk text from sanitized text (chunk positions are in sanitized text)
+				const chunkText = sanitizedText.substring(chunk.char_start, chunk.char_end);
 				
 				try {
 					const embedding = await this.generateEmbeddingForText(chunkText);
@@ -1241,47 +1286,280 @@ export default class MarginaliaPlugin extends Plugin {
 	/**
 	 * Clean markdown content for embedding (remove frontmatter, links, etc.)
 	 */
-	private cleanMarkdownForEmbedding(content: string): string {
-		let cleaned = content;
+	/**
+	 * Sanitize markdown content for embedding, removing unnecessary elements
+	 * Returns both the sanitized text and a position mapping array
+	 * positionMap[i] = original position of sanitized character at position i
+	 */
+	private sanitizeMarkdownForEmbedding(originalContent: string): { sanitizedText: string; positionMap: number[] } {
+		const positionMap: number[] = [];
+		let sanitizedText = '';
+		let originalIndex = 0;
+		let sanitizedIndex = 0;
+
+		// First pass: identify ranges to remove
+		const rangesToRemove: Array<{ start: number; end: number }> = [];
 
 		// Remove frontmatter
-		const frontmatterRegex = /^---\s*\n[\s\S]*?\n---\s*\n/;
-		cleaned = cleaned.replace(frontmatterRegex, '');
+		const frontmatterMatch = originalContent.match(/^---\s*\n[\s\S]*?\n---\s*\n/);
+		if (frontmatterMatch) {
+			rangesToRemove.push({ start: frontmatterMatch.index!, end: frontmatterMatch.index! + frontmatterMatch[0].length });
+		}
 
-		// Remove markdown links but keep the text: [text](url) -> text
-		cleaned = cleaned.replace(/\[([^\]]+)\]\([^\)]+\)/g, '$1');
+		// Remove URLs (http://, https://, www.)
+		const urlRegex = /https?:\/\/[^\s\)]+|www\.[^\s\)]+/gi;
+		let match;
+		while ((match = urlRegex.exec(originalContent)) !== null) {
+			rangesToRemove.push({ start: match.index, end: match.index + match[0].length });
+		}
 
-		// Remove image links: ![alt](url) -> alt
-		cleaned = cleaned.replace(/!\[([^\]]*)\]\([^\)]+\)/g, '$1');
+		// Remove markdown/image links (keep text, remove link part)
+		const linkRegex = /\[([^\]]+)\]\([^\)]+\)/g;
+		while ((match = linkRegex.exec(originalContent)) !== null) {
+			// Remove the link part but keep the text
+			const linkStart = match.index! + match[0].indexOf('(');
+			const linkEnd = match.index! + match[0].length;
+			rangesToRemove.push({ start: linkStart, end: linkEnd });
+		}
 
-		// Remove reference-style links: [text][ref] -> text
-		cleaned = cleaned.replace(/\[([^\]]+)\]\[[^\]]+\]/g, '$1');
+		const imageRegex = /!\[([^\]]*)\]\([^\)]+\)/g;
+		while ((match = imageRegex.exec(originalContent)) !== null) {
+			rangesToRemove.push({ start: match.index!, end: match.index! + match[0].length });
+		}
 
-		// Remove HTML tags but keep text content
-		cleaned = cleaned.replace(/<[^>]+>/g, '');
+		const refLinkRegex = /\[([^\]]+)\]\[[^\]]+\]/g;
+		while ((match = refLinkRegex.exec(originalContent)) !== null) {
+			const refStart = match.index! + match[0].indexOf('[');
+			const refEnd = match.index! + match[0].length;
+			rangesToRemove.push({ start: refStart, end: refEnd });
+		}
 
-		// Remove markdown code blocks but keep content
-		cleaned = cleaned.replace(/```[\s\S]*?```/g, '');
-		cleaned = cleaned.replace(/`[^`]+`/g, '');
+		// Remove HTML tags
+		const htmlTagRegex = /<[^>]+>/g;
+		while ((match = htmlTagRegex.exec(originalContent)) !== null) {
+			rangesToRemove.push({ start: match.index!, end: match.index! + match[0].length });
+		}
 
-		// Remove markdown headers but keep text
-		cleaned = cleaned.replace(/^#{1,6}\s+/gm, '');
+		// Remove markdown code blocks (entire blocks)
+		const codeBlockRegex = /```[\s\S]*?```/g;
+		while ((match = codeBlockRegex.exec(originalContent)) !== null) {
+			rangesToRemove.push({ start: match.index!, end: match.index! + match[0].length });
+		}
 
-		// Remove markdown emphasis but keep text
-		cleaned = cleaned.replace(/\*\*([^\*]+)\*\*/g, '$1');
-		cleaned = cleaned.replace(/\*([^\*]+)\*/g, '$1');
-		cleaned = cleaned.replace(/__([^_]+)__/g, '$1');
-		cleaned = cleaned.replace(/_([^_]+)_/g, '$1');
+		// Remove inline code
+		const inlineCodeRegex = /`[^`]+`/g;
+		while ((match = inlineCodeRegex.exec(originalContent)) !== null) {
+			rangesToRemove.push({ start: match.index!, end: match.index! + match[0].length });
+		}
 
-		// Remove markdown lists markers
-		cleaned = cleaned.replace(/^[\s]*[-*+]\s+/gm, '');
-		cleaned = cleaned.replace(/^[\s]*\d+\.\s+/gm, '');
+		// Remove tag clusters used for categorization
+		// These are typically at the beginning or end of notes, or lines with multiple tags
+		const lines = originalContent.split('\n');
+		let lineStartPos = 0;
+		const tagLineRanges: Array<{ start: number; end: number; isTagOnly: boolean }> = [];
+		
+		// First pass: identify lines with tags
+		for (let i = 0; i < lines.length; i++) {
+			const line = lines[i];
+			const lineEndPos = lineStartPos + line.length;
+			const tagMatches = line.match(/#[\w-]+/g);
+			const tagCount = tagMatches ? tagMatches.length : 0;
+			
+			if (tagCount > 0 && tagMatches) {
+				// Check if line is primarily tags (tags make up significant portion of non-whitespace content)
+				const nonWhitespace = line.replace(/\s/g, '');
+				const tagChars = tagMatches.join('').length;
+				const isTagOnly = tagChars >= nonWhitespace.length * 0.5; // Tags are 50%+ of content
+				const hasMultipleTags = tagCount >= 2;
+				
+				// Include if: multiple tags, or tag-only line, or single tag at start/end of note
+				if (hasMultipleTags || isTagOnly || (tagCount === 1 && (i < 3 || i >= lines.length - 3))) {
+					tagLineRanges.push({
+						start: lineStartPos,
+						end: i === lines.length - 1 ? originalContent.length : lineEndPos + 1,
+						isTagOnly: isTagOnly || hasMultipleTags
+					});
+				}
+			}
+			
+			lineStartPos = lineEndPos + 1; // +1 for newline
+		}
+		
+		// Second pass: merge consecutive tag lines into clusters
+		if (tagLineRanges.length > 0) {
+			tagLineRanges.sort((a, b) => a.start - b.start);
+			
+			let clusterStart = -1;
+			let clusterEnd = -1;
+			let inCluster = false;
+			
+			for (let i = 0; i < tagLineRanges.length; i++) {
+				const current = tagLineRanges[i];
+				
+				if (!inCluster) {
+					// Start new cluster
+					clusterStart = current.start;
+					clusterEnd = current.end;
+					inCluster = true;
+				} else {
+					// Check if this line is consecutive or near the previous cluster
+					// Allow small gaps (empty lines) between tag lines
+					const gap = current.start - clusterEnd;
+					if (gap <= 2) { // Allow up to 2 characters gap (newline + maybe space)
+						// Extend cluster
+						clusterEnd = current.end;
+					} else {
+						// End current cluster and start new one
+						rangesToRemove.push({ start: clusterStart, end: clusterEnd });
+						clusterStart = current.start;
+						clusterEnd = current.end;
+					}
+				}
+			}
+			
+			// Add final cluster
+			if (inCluster) {
+				rangesToRemove.push({ start: clusterStart, end: clusterEnd });
+			}
+		}
 
-		// Clean up extra whitespace
-		cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
-		cleaned = cleaned.trim();
+		// Sort and merge overlapping ranges
+		rangesToRemove.sort((a, b) => a.start - b.start);
+		const mergedRanges: Array<{ start: number; end: number }> = [];
+		for (const range of rangesToRemove) {
+			if (mergedRanges.length === 0 || range.start > mergedRanges[mergedRanges.length - 1].end) {
+				mergedRanges.push({ ...range });
+			} else {
+				mergedRanges[mergedRanges.length - 1].end = Math.max(
+					mergedRanges[mergedRanges.length - 1].end,
+					range.end
+				);
+			}
+		}
 
-		return cleaned;
+		// Second pass: build sanitized text and position map
+		originalIndex = 0;
+		sanitizedIndex = 0;
+		let rangeIndex = 0;
+
+		while (originalIndex < originalContent.length) {
+			// Check if we're in a range to remove
+			if (rangeIndex < mergedRanges.length && 
+				originalIndex >= mergedRanges[rangeIndex].start && 
+				originalIndex < mergedRanges[rangeIndex].end) {
+				// Skip this character
+				originalIndex++;
+				continue;
+			}
+
+			// Check if we've passed a range
+			if (rangeIndex < mergedRanges.length && originalIndex >= mergedRanges[rangeIndex].end) {
+				rangeIndex++;
+				continue;
+			}
+
+			// Include this character
+			const char = originalContent[originalIndex];
+			
+			// Remove markdown formatting but keep text
+			if (char === '#' && /^#{1,6}\s/.test(originalContent.substring(originalIndex))) {
+				// Skip header markers
+				while (originalIndex < originalContent.length && originalContent[originalIndex] === '#') {
+					originalIndex++;
+				}
+				// Skip space after header
+				if (originalIndex < originalContent.length && originalContent[originalIndex] === ' ') {
+					originalIndex++;
+				}
+				continue;
+			}
+
+			// Remove markdown emphasis markers but keep text
+			if ((char === '*' || char === '_') && originalIndex + 1 < originalContent.length) {
+				const nextChar = originalContent[originalIndex + 1];
+				if (nextChar === char) {
+					// Bold marker ** or __
+					originalIndex += 2;
+					continue;
+				} else if (/\w/.test(nextChar)) {
+					// Might be emphasis, but we'll keep it for now to preserve text
+					// Actually, let's remove single emphasis markers
+					originalIndex++;
+					continue;
+				}
+			}
+
+			// Remove list markers
+			if ((char === '-' || char === '*' || char === '+') && 
+				originalIndex + 1 < originalContent.length && 
+				originalContent[originalIndex + 1] === ' ') {
+				// Check if at start of line
+				const lineStart = originalContent.lastIndexOf('\n', originalIndex - 1) + 1;
+				const beforeMarker = originalContent.substring(lineStart, originalIndex);
+				if (/^\s*$/.test(beforeMarker)) {
+					originalIndex += 2; // Skip marker and space
+					continue;
+				}
+			}
+
+			// Numbered list
+			if (/\d/.test(char) && originalIndex + 1 < originalContent.length) {
+				const numMatch = originalContent.substring(originalIndex).match(/^\d+\.\s/);
+				if (numMatch) {
+					const lineStart = originalContent.lastIndexOf('\n', originalIndex - 1) + 1;
+					const beforeMarker = originalContent.substring(lineStart, originalIndex);
+					if (/^\s*$/.test(beforeMarker)) {
+						originalIndex += numMatch[0].length;
+						continue;
+					}
+				}
+			}
+
+			// Normal character - include it
+			sanitizedText += char;
+			positionMap[sanitizedIndex] = originalIndex;
+			sanitizedIndex++;
+			originalIndex++;
+		}
+
+		// Clean up extra whitespace - replace multiple newlines with double newline
+		sanitizedText = sanitizedText.replace(/\n{3,}/g, '\n\n');
+		
+		// Trim leading/trailing whitespace and adjust position map
+		const leadingWhitespace = sanitizedText.match(/^\s*/)?.[0].length || 0;
+		const trailingWhitespace = sanitizedText.match(/\s*$/)?.[0].length || 0;
+		
+		sanitizedText = sanitizedText.trim();
+		const finalPositionMap = positionMap.slice(leadingWhitespace, positionMap.length - trailingWhitespace);
+
+		return { sanitizedText, positionMap: finalPositionMap };
+	}
+
+	/**
+	 * Map chunk positions from sanitized text back to original text
+	 */
+	private mapChunkPositionsToOriginal(
+		chunks: Array<{ char_start: number; char_end: number }>,
+		positionMap: number[]
+	): Array<{ char_start: number; char_end: number }> {
+		return chunks.map(chunk => {
+			const originalStart = positionMap[chunk.char_start] ?? chunk.char_start;
+			// For char_end, use the position of the last character in the chunk
+			const endIndex = Math.min(chunk.char_end - 1, positionMap.length - 1);
+			const originalEnd = endIndex >= 0 ? (positionMap[endIndex] ?? chunk.char_end) + 1 : originalStart + 1;
+			return {
+				char_start: originalStart,
+				char_end: originalEnd
+			};
+		});
+	}
+
+	/**
+	 * Legacy function for backwards compatibility - now uses sanitizeMarkdownForEmbedding
+	 */
+	private cleanMarkdownForEmbedding(content: string): string {
+		const { sanitizedText } = this.sanitizeMarkdownForEmbedding(content);
+		return sanitizedText;
 	}
 
 	/**
@@ -1315,42 +1593,47 @@ export default class MarginaliaPlugin extends Plugin {
 	/**
 	 * Use qwen2.5:3b-instruct to chunk a long file into semantic chunks
 	 */
-	private async chunkFileWithQwen(content: string, filePath?: string): Promise<Array<{ char_start: number; char_end: number }>> {
+	private async chunkFileWithQwen(content: string, filePath?: string, maxChunkSize?: number): Promise<Array<{ char_start: number; char_end: number }>> {
 		const address = this.settings.ollamaAddress || 'localhost';
 		const port = this.settings.ollamaPort || '11434';
 		const baseUrl = `http://${address}:${port}`;
+		const chunkSize = maxChunkSize || this.settings.maxChunkSize || 1800;
 
-		const prompt = `You are a text chunking assistant. Divide the text below into chunks by providing character position ranges.
+		const prompt = `You are a text chunking tool. Your ONLY job is to return character position ranges.
 
-YOUR TASK: Read the text and determine where to split it. Return a JSON array where each element is an object with "char_start" and "char_end" properties showing the character positions of each chunk.
+CRITICAL REQUIREMENTS:
+1. The text is exactly ${content.length} characters long. You MUST analyze the ACTUAL text provided.
+2. Return ONLY a JSON array with this EXACT format: [{"char_start": number, "char_end": number}, ...]
+3. You are NOT extracting concepts, topics, themes, summaries, or keywords.
+4. You are NOT creating section names, titles, or descriptions.
+5. You are ONLY returning character position numbers (char_start and char_end).
+6. Do NOT return strings, arrays of strings, or objects with fields like "section", "summary", "topic", "realm", "tag", etc.
+7. Do NOT return markdown code blocks, explanations, or any text outside the JSON array.
 
-IMPORTANT: You are NOT extracting concepts, topics, keywords, or any other content. You are ONLY providing character position numbers that indicate where chunks begin and end in the original text.
+CHUNKING PRINCIPLES:
+- Each chunk should represent a complete idea, scene, argument stage, or conceptual move.
+- Start a new chunk when the focus, purpose, analytical step, narrative beat, or stage in an argument meaningfully shifts or progresses.
+- Even when the overall topic remains consistent, internal progression (e.g., setup → development → implication) can justify subdivision.
+- Favor longer chunks of similar meaning rather than splitting into smaller chunks.
+- Prefer fewer, larger chunks that fully express their ideas over many small or fragmentary chunks.
 
-REQUIREMENTS:
-- Each chunk must be less than 7000 characters
-- Make chunks as close to 7000 characters as possible while maintaining semantic boundaries
-- You may skip irrelevant content like metadata, links, or other non-semantic text
-- Chunks do not need to be contiguous - gaps are acceptable
-- Return ONLY a JSON array - no explanations, no text before or after, no markdown code blocks
+OUTPUT FORMAT (REQUIRED):
+- Return ONLY: [{"char_start": number, "char_end": number}, ...]
+- All char_end values MUST be ≤ ${content.length}.
+- Do NOT include any other fields, labels, or text.
 
-REQUIRED OUTPUT FORMAT:
-[{"char_start": 0, "char_end": 5000}, {"char_start": 5200, "char_end": 10000}]
-
-Each object must have:
-- "char_start": a number (starting character position)
-- "char_end": a number (ending character position)
-
-Text to chunk (total length: ${content.length} characters):
+TEXT TO ANALYZE (${content.length} characters):
 ${content}
 
-Output ONLY the JSON array with char_start and char_end objects.`;
+Return ONLY the JSON array with char_start and char_end numbers:`;
 
 		console.log(`Sending qwen2.5:3b-instruct query for chunking${filePath ? ` (file: ${filePath})` : ''} (${content.length} characters)`);
 
 		const controller = new AbortController();
-		// Use longer timeout for chunking as large files can take time to analyze
-		// Calculate timeout based on file size: base 60s + 1s per 1000 characters (max 180s)
-		const timeoutMs = Math.min(60000 + Math.floor(content.length / 1000) * 1000, 180000);
+		// Use longer timeout for chunking as large files can take time to analyze semantically
+		// Calculate timeout based on file size: base 90s + 2s per 1000 characters (max 300s)
+		// Increased timeout because Qwen needs time to analyze text semantically and avoid standardized patterns
+		const timeoutMs = Math.min(90000 + Math.floor(content.length / 1000) * 2000, 300000);
 		const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 		const timeoutSeconds = Math.floor(timeoutMs / 1000);
 
@@ -1377,7 +1660,8 @@ Output ONLY the JSON array with char_start and char_end objects.`;
 			}
 
 			const data = await response.json();
-			const responseText = data.response || '';
+			// Handle both /api/generate and /api/chat response formats
+			const responseText = data.message?.content || data.response || '';
 			
 			console.log(`qwen2.5:3b-instruct chunking response received (${responseText.length} characters):`, responseText.substring(0, 500) + (responseText.length > 500 ? '...' : ''));
 			
@@ -1395,18 +1679,253 @@ Output ONLY the JSON array with char_start and char_end objects.`;
 			
 			if (jsonMatch) {
 				try {
-					const chunks = JSON.parse(jsonMatch[0]);
+					// Clean up common JSON issues before parsing
+					let jsonStr = jsonMatch[0];
+					
+					// Remove leading/trailing whitespace and newlines
+					jsonStr = jsonStr.trim();
+					
+					// Fix missing "char_end" property name (e.g., {"char_start": 725, 7278} -> {"char_start": 725, "char_end": 7278})
+					// This pattern matches: "char_start": number, number followed by } or ]
+					jsonStr = jsonStr.replace(/"char_start":\s*(\d+),\s*(\d+)(\s*[}\]])/g, '"char_start": $1, "char_end": $2$3');
+					
+					// Fix cases where there's a comma followed by a number before closing brace (missing "char_end":)
+					// This handles cases like: {"char_start": 0, "char_end": 100}, {"char_start": 101, 200}
+					jsonStr = jsonStr.replace(/,(\s*)(\d+)(\s*)\}/g, ', "char_end": $2 }');
+					
+					// Fix cases where there's a comma followed by a number before another comma (in array)
+					jsonStr = jsonStr.replace(/,(\s*)(\d+)(\s*),/g, ', "char_end": $2,');
+					
+					// Remove trailing commas before closing brackets/braces
+					jsonStr = jsonStr.replace(/,(\s*)\]/g, ']');
+					jsonStr = jsonStr.replace(/,(\s*)\}/g, '}');
+					
+					// Remove newlines and extra whitespace inside the JSON
+					jsonStr = jsonStr.replace(/\n\s*/g, ' ');
+					jsonStr = jsonStr.replace(/\s+/g, ' ');
+					
+					let chunks = JSON.parse(jsonStr);
 					if (Array.isArray(chunks) && chunks.every(c => c.char_start !== undefined && c.char_end !== undefined)) {
+						// Check if response looks like a template/example (suspicious patterns)
+						const maxCharEnd = Math.max(...chunks.map((c: any) => c.char_end || 0));
+						const hasSuspiciousPattern = chunks.some((c: any) => 
+							(c.char_start === 0 && c.char_end === 5000) ||
+							(c.char_start === 5200 && c.char_end === 10000) ||
+							(c.char_end > content.length * 1.5) // End position way beyond content
+						);
+						
+						// Check for fixed-size chunking patterns - only reject if multiple chunks are the same standardized size
+						// This catches cases where Qwen is using a template pattern (e.g., 2+ chunks of exactly 500 chars each)
+						let hasFixedSizePattern = false;
+						if (chunks.length > 1) {
+							// Standardized sizes that indicate template usage when repeated
+							const standardizedSizes = [500, 1000, 1500, 2000, 2500, 3000];
+							
+							// Only reject if we have 2+ chunks that are all the same standardized size
+							// This catches the pattern issue (e.g., 2 chunks of exactly 500 each) without
+							// rejecting legitimate cases where a single chunk happens to be a round number
+							if (chunks.length >= 2) {
+								const chunkSizes = chunks.map((c: any) => c.char_end - c.char_start);
+								// Check if all chunks (or all but the last) are the same standardized size
+								const allButLastSameSize = chunkSizes.slice(0, -1).every((size: number) => 
+									size === chunkSizes[0] && standardizedSizes.includes(size)
+								);
+								const allSameSize = chunkSizes.every((size: number) => 
+									size === chunkSizes[0] && standardizedSizes.includes(size)
+								);
+								
+								// Reject if all chunks (or all but last) are the same standardized size
+								// This indicates a template pattern rather than semantic analysis
+								if (allButLastSameSize || (allSameSize && chunks.length >= 2)) {
+									hasFixedSizePattern = true;
+								}
+							}
+						}
+						
+						if (hasSuspiciousPattern || maxCharEnd > content.length || hasFixedSizePattern) {
+							console.error('qwen2.5:3b-instruct returned template/example values instead of analyzing actual text. Chunks:', chunks);
+							console.error(`Content length is ${content.length} but chunks reference positions up to ${maxCharEnd}`);
+							if (hasFixedSizePattern) {
+								console.error('Detected fixed-size/standardized chunking pattern - Qwen appears to be using a template rather than analyzing the text.');
+								console.error('First chunk starts at 0 with standardized size, or chunks follow exact standardized increments.');
+							}
+							throw new Error('Qwen returned template values instead of analyzing actual text');
+						}
+						
+						// Split any chunks that exceed maxChunkSize deterministically, recursively until all are under limit
+						const maxChunkSize = this.settings.maxChunkSize || 1800;
+						const splitChunkAtMidpoint = (chunk: { char_start: number; char_end: number }): Array<{ char_start: number; char_end: number }> => {
+							const chunkStart = chunk.char_start;
+							const chunkEnd = chunk.char_end;
+							const chunkSize = chunkEnd - chunkStart;
+							
+							// Safety check: if chunk is too small to split meaningfully, return as-is
+							if (chunkSize <= 1) {
+								return [chunk];
+							}
+							
+							const chunkMidpoint = chunkStart + Math.floor(chunkSize / 2);
+							
+							// Find the largest paragraph boundary or linefeed closest to chunk midpoint
+							let bestSplitPoint = chunkMidpoint;
+							let bestDistance = content.length;
+							
+							// Search for paragraph boundaries (double newline) near chunk midpoint
+							const paragraphPattern = /\n\n/g;
+							let match;
+							paragraphPattern.lastIndex = chunkStart; // Start searching from chunk start
+							while ((match = paragraphPattern.exec(content)) !== null) {
+								const pos = match.index + 2; // Position after the double newline
+								// Only consider positions within this chunk
+								if (pos > chunkStart && pos < chunkEnd) {
+									const distance = Math.abs(pos - chunkMidpoint);
+									if (distance < bestDistance) {
+										bestDistance = distance;
+										bestSplitPoint = pos;
+									}
+								}
+								// Stop if we've gone past the chunk
+								if (match.index >= chunkEnd) break;
+							}
+							
+							// If no paragraph boundary found, search for single newlines
+							if (bestSplitPoint === chunkMidpoint) {
+								const newlinePattern = /\n/g;
+								// Reset regex to search from chunk start
+								newlinePattern.lastIndex = chunkStart;
+								while ((match = newlinePattern.exec(content)) !== null) {
+									const pos = match.index + 1; // Position after the newline
+									// Only consider positions within this chunk
+									if (pos > chunkStart && pos < chunkEnd) {
+										const distance = Math.abs(pos - chunkMidpoint);
+										if (distance < bestDistance) {
+											bestDistance = distance;
+											bestSplitPoint = pos;
+										}
+									}
+									// Stop if we've gone past the chunk
+									if (match.index >= chunkEnd) break;
+								}
+							}
+							
+							// If still no boundary found, search for sentence breaks (period, exclamation, question mark followed by space or end)
+							if (bestSplitPoint === chunkMidpoint) {
+								const sentencePattern = /[.!?]+(?:\s+|$)/g;
+								sentencePattern.lastIndex = chunkStart;
+								while ((match = sentencePattern.exec(content)) !== null) {
+									const pos = match.index + match[0].length; // Position after the sentence ending
+									// Only consider positions within this chunk
+									if (pos > chunkStart && pos < chunkEnd) {
+										const distance = Math.abs(pos - chunkMidpoint);
+										if (distance < bestDistance) {
+											bestDistance = distance;
+											bestSplitPoint = pos;
+										}
+									}
+									// Stop if we've gone past the chunk
+									if (match.index >= chunkEnd) break;
+								}
+							}
+							
+							// Ensure split point is valid (not at start or end, and creates non-zero chunks)
+							if (bestSplitPoint <= chunkStart) {
+								bestSplitPoint = chunkStart + 1;
+							}
+							if (bestSplitPoint >= chunkEnd) {
+								bestSplitPoint = chunkEnd - 1;
+							}
+							
+							// Final safety check: ensure both resulting chunks would be non-zero
+							if (bestSplitPoint <= chunkStart || bestSplitPoint >= chunkEnd) {
+								// Fallback: split at exact midpoint if no good split point found
+								bestSplitPoint = chunkMidpoint;
+								// But ensure it's not at boundaries
+								if (bestSplitPoint <= chunkStart) bestSplitPoint = chunkStart + 1;
+								if (bestSplitPoint >= chunkEnd) bestSplitPoint = chunkEnd - 1;
+							}
+							
+							// Return two chunks (guaranteed to be non-zero size due to checks above)
+							return [
+								{ char_start: chunkStart, char_end: bestSplitPoint },
+								{ char_start: bestSplitPoint, char_end: chunkEnd }
+							];
+						};
+						
+						// Iteratively split chunks until all are under maxChunkSize (using iteration to avoid stack overflow)
+						const initialCount = chunks.length;
+						let chunksToProcess = [...chunks];
+						const maxIterations = 100; // Safety limit to prevent infinite loops
+						let iteration = 0;
+						
+						while (iteration < maxIterations) {
+							const nextChunks: Array<{ char_start: number; char_end: number }> = [];
+							let hasOversizedChunks = false;
+							
+							for (const chunk of chunksToProcess) {
+								const chunkSize = chunk.char_end - chunk.char_start;
+								if (chunkSize > maxChunkSize) {
+									hasOversizedChunks = true;
+									const splitChunks = splitChunkAtMidpoint(chunk);
+									// Only add valid chunks (non-zero size)
+									for (const splitChunk of splitChunks) {
+										if (splitChunk.char_end > splitChunk.char_start) {
+											nextChunks.push(splitChunk);
+										}
+									}
+								} else {
+									nextChunks.push(chunk);
+								}
+							}
+							
+							// If no oversized chunks found, we're done
+							if (!hasOversizedChunks) {
+								break;
+							}
+							
+							// Safety check: if we didn't make progress (same number of chunks or fewer), break to avoid infinite loop
+							if (nextChunks.length <= chunksToProcess.length && nextChunks.length > 0) {
+								// Check if any chunks are still oversized
+								const stillOversized = nextChunks.some(chunk => (chunk.char_end - chunk.char_start) > maxChunkSize);
+								if (stillOversized) {
+									console.warn('Splitting is not making progress. Some chunks may still exceed maxChunkSize.');
+									break;
+								}
+							}
+							
+							chunksToProcess = nextChunks;
+							iteration++;
+						}
+						
+						if (iteration >= maxIterations) {
+							console.error(`Warning: Reached maximum iterations (${maxIterations}) while splitting chunks. Some chunks may still exceed maxChunkSize.`);
+						}
+						
+						// Filter out any invalid chunks (zero or negative size) before validation
+						chunksToProcess = chunksToProcess.filter(chunk => chunk.char_end > chunk.char_start);
+						
+						chunks = chunksToProcess;
+						if (chunks.length !== initialCount) {
+							console.log(`Deterministically split chunks exceeding maxChunkSize: ${initialCount} → ${chunks.length} chunks`);
+						}
+						
 						console.log(`qwen2.5:3b-instruct returned valid chunks:`, chunks);
 						// Validate chunks are within bounds (but don't force them to be contiguous)
 						// Gaps are acceptable as they may represent discarded metadata, links, etc.
-						return this.validateChunks(chunks, content.length);
+						const validated = this.validateChunks(chunks, content.length);
+						
+						// Additional check: ensure at least some chunks were actually used
+						if (validated.length === 0) {
+							throw new Error('All chunks were invalid or out of bounds');
+						}
+						
+						return validated;
 					} else {
 						console.error('qwen2.5:3b-instruct returned chunks but they do not match expected format:', chunks);
 					}
 				} catch (parseError) {
 					console.error('Error parsing JSON from qwen2.5:3b-instruct response:', parseError);
 					console.error('JSON match was:', jsonMatch[0]);
+					throw parseError;
 				}
 			} else {
 				console.error('qwen2.5:3b-instruct response does not contain a JSON array. Full response:', responseText);
@@ -1422,6 +1941,81 @@ Output ONLY the JSON array with char_start and char_end objects.`;
 
 		// If we get here, chunking failed - throw error to trigger retry
 		throw new Error('qwen2.5:3b-instruct failed to return valid chunks. File will be retried.');
+	}
+
+	/**
+	 * Generate monk-style marginalia text using Qwen
+	 */
+	public async generateMonkMarginalia(selectedText: string): Promise<string | null> {
+		if (!this.settings.ollamaAvailable || !selectedText || selectedText.trim().length === 0) {
+			return null;
+		}
+
+		const address = this.settings.ollamaAddress || 'localhost';
+		const port = this.settings.ollamaPort || '11434';
+		const baseUrl = `http://${address}:${port}`;
+
+		const controller = new AbortController();
+		const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+
+		try {
+			const prompt = `You are an ancient Irish monk scribe writing marginalia in a manuscript. Based on the following selected text, write a short, evocative marginal note in the style of medieval Irish monastic scribes.
+
+STYLE REQUIREMENTS:
+- Short, poignant, or humorous observations
+- Evocative of the scribe's experience (cold, tired, weary, etc.)
+- May reference the text in some small way, but primarily about the scribe's condition or thoughts
+- Classic examples include: "I am very cold.", "Thank God, it will soon be dark.", "Oh, my hand.", "Writing is excessive drudgery. It crooks your back, it dims your sight, it twists your stomach and your sides."
+- Should be 1-2 sentences maximum
+- Should feel authentic to medieval Irish monastic marginalia
+
+The marginal note should be subtly related to the selected text in some way, but primarily capture the scribe's voice and experience.
+
+Selected text:
+${selectedText}
+
+Write the marginal note now (just the note, no explanations):`;
+
+			const response = await fetch(`${baseUrl}/api/generate`, {
+				method: 'POST',
+				headers: {
+					'Content-Type': 'application/json'
+				},
+				body: JSON.stringify({
+					model: 'qwen2.5:3b-instruct',
+					prompt: prompt,
+					stream: false
+				}),
+				signal: controller.signal
+			});
+
+			clearTimeout(timeoutId);
+
+			if (!response.ok) {
+				const errorText = await response.text();
+				console.error(`qwen2.5:3b-instruct monk marginalia query failed with status ${response.status}:`, errorText);
+				return null;
+			}
+
+			const data = await response.json();
+			const responseText = data.response || '';
+			
+			// Clean up the response - remove any markdown code blocks, quotes, or extra formatting
+			let cleanedText = responseText.trim();
+			cleanedText = cleanedText.replace(/^```[\w]*\n?/g, '').replace(/```$/g, ''); // Remove code blocks
+			cleanedText = cleanedText.replace(/^["']|["']$/g, ''); // Remove surrounding quotes
+			cleanedText = cleanedText.trim();
+			
+			return cleanedText || null;
+		} catch (error) {
+			clearTimeout(timeoutId);
+			if (error instanceof Error && error.name === 'AbortError') {
+				console.error('qwen2.5:3b-instruct monk marginalia request timeout (30s)');
+			} else {
+				console.error('Error generating monk marginalia:', error);
+			}
+			return null;
+		}
 	}
 
 	/**
@@ -1570,6 +2164,110 @@ Output ONLY the JSON array with char_start and char_end objects.`;
 		const percentage = total > 0 ? Math.round((embedded / total) * 100) : 0;
 
 		return { total, embedded, percentage };
+	}
+
+	/**
+	 * Redo embeddings for files with single chunks that exceed the maxChunkSize setting
+	 */
+	public async redoAffectedEmbeddings(): Promise<number> {
+		try {
+			const embeddings = await this.loadEmbeddings();
+			const maxChunkSize = this.settings.maxChunkSize || 1800;
+			const affectedPaths: string[] = [];
+
+			// Find embeddings with single chunks that exceed the limit
+			for (const embedding of embeddings) {
+				if (!embedding.chunks || embedding.chunks.length !== 1) {
+					continue; // Skip files with multiple chunks or no chunks
+				}
+
+				const chunk = embedding.chunks[0];
+				const chunkLength = chunk.char_end - chunk.char_start;
+
+				if (chunkLength > maxChunkSize) {
+					affectedPaths.push(embedding.source_path);
+				}
+			}
+
+			if (affectedPaths.length === 0) {
+				return 0;
+			}
+
+			// Remove affected embeddings
+			const normalizedAffectedPaths = new Set(affectedPaths.map(p => this.normalizePath(p)));
+			const remainingEmbeddings = embeddings.filter(e => 
+				!normalizedAffectedPaths.has(this.normalizePath(e.source_path))
+			);
+
+			// Save updated embeddings
+			await this.saveEmbeddings(remainingEmbeddings);
+
+			// Add affected files to the embedding queue
+			for (const path of affectedPaths) {
+				const file = this.app.vault.getAbstractFileByPath(path);
+				if (file instanceof TFile && file.extension === 'md') {
+					this.embeddingQueue.add(path);
+				}
+			}
+
+			// Start processing queue if embedding is on
+			if (this.settings.embeddingOn && this.embeddingQueue.size > 0) {
+				this.processEmbeddingQueue();
+			}
+
+			return affectedPaths.length;
+		} catch (error) {
+			console.error('Error redoing affected embeddings:', error);
+			throw error;
+		}
+	}
+
+	/**
+	 * Calculate average chunk lengths from embeddings
+	 */
+	public async getChunkStatistics(): Promise<{ avgLengthAll: number; avgLengthMultiChunk: number }> {
+		try {
+			const embeddings = await this.loadEmbeddings();
+			
+			if (embeddings.length === 0) {
+				return { avgLengthAll: 0, avgLengthMultiChunk: 0 };
+			}
+
+			let totalChunks = 0;
+			let totalLength = 0;
+			let multiChunkFiles = 0;
+			let multiChunkTotalLength = 0;
+
+			for (const embedding of embeddings) {
+				if (!embedding.chunks || embedding.chunks.length === 0) {
+					continue;
+				}
+
+				// Calculate lengths for all chunks in this file
+				for (const chunk of embedding.chunks) {
+					const length = chunk.char_end - chunk.char_start;
+					totalChunks++;
+					totalLength += length;
+				}
+
+				// If file has more than 1 chunk, include in multi-chunk statistics
+				if (embedding.chunks.length > 1) {
+					for (const chunk of embedding.chunks) {
+						const length = chunk.char_end - chunk.char_start;
+						multiChunkFiles++;
+						multiChunkTotalLength += length;
+					}
+				}
+			}
+
+			const avgLengthAll = totalChunks > 0 ? Math.round(totalLength / totalChunks) : 0;
+			const avgLengthMultiChunk = multiChunkFiles > 0 ? Math.round(multiChunkTotalLength / multiChunkFiles) : 0;
+
+			return { avgLengthAll, avgLengthMultiChunk };
+		} catch (error) {
+			console.error('Error calculating chunk statistics:', error);
+			return { avgLengthAll: 0, avgLengthMultiChunk: 0 };
+		}
 	}
 
 	private async loadMarginaliaData() {
@@ -2484,12 +3182,15 @@ class MarginNoteModal extends Modal {
 	private onSubmit: (note: string, color?: string) => void;
 	private defaultColor: string;
 	private selectedText: string;
+	private plugin: MarginaliaPlugin;
 
-	constructor(app: any, defaultColor: string, onSubmit: (note: string, color?: string) => void, selectedText?: string) {
+	constructor(app: any, defaultColor: string, onSubmit: (note: string, color?: string) => void, selectedText?: string, plugin?: MarginaliaPlugin) {
 		super(app);
 		this.onSubmit = onSubmit;
 		this.defaultColor = defaultColor;
 		this.selectedText = selectedText || '';
+		// Get plugin instance from app if not provided
+		this.plugin = plugin || (app.plugins.plugins['marginalia'] as MarginaliaPlugin);
 	}
 
 	onOpen() {
@@ -2553,6 +3254,43 @@ class MarginNoteModal extends Modal {
 				target.value = target.value.substring(0, MAX_CHARS);
 			}
 			updateCounter();
+		});
+
+		// Hidden feature: detect "/ghost" and generate monk-style marginalia
+		input.addEventListener('keydown', async (e: KeyboardEvent) => {
+			const target = e.target as HTMLTextAreaElement;
+			const value = target.value;
+			
+			// Check if user typed "/ghost" (case-insensitive)
+			if (value.toLowerCase().includes('/ghost')) {
+				e.preventDefault();
+				
+				// Show loading state
+				const originalValue = target.value;
+				target.value = 'Summoning the ghost of the scribe...';
+				target.disabled = true;
+				
+				try {
+					const monkText = await this.plugin.generateMonkMarginalia(this.selectedText);
+					if (monkText) {
+						target.value = monkText;
+						updateCounter();
+					} else {
+						target.value = originalValue;
+						// Show error notice
+						const notice = new (this.app as any).Notice('Failed to generate monk marginalia. Check Ollama connection.');
+						setTimeout(() => notice.hide(), 3000);
+					}
+				} catch (error) {
+					console.error('Error generating monk marginalia:', error);
+					target.value = originalValue;
+					const notice = new (this.app as any).Notice('Error generating monk marginalia.');
+					setTimeout(() => notice.hide(), 3000);
+				} finally {
+					target.disabled = false;
+					target.focus();
+				}
+			}
 		});
 
 		// Initialize counter
@@ -2632,7 +3370,6 @@ class MarginaliaSettingTab extends PluginSettingTab {
 	async display(): Promise<void> {
 		const { containerEl } = this;
 		containerEl.empty();
-		containerEl.createEl('h2', { text: 'Marginalia Settings' });
 
 		// Ollama Settings Section
 		containerEl.createEl('h3', { text: 'Ollama Configuration' });
@@ -2802,6 +3539,104 @@ class MarginaliaSettingTab extends PluginSettingTab {
 					});
 			});
 
+		// Max Chunk Size Slider with Redo Button
+		const maxChunkSizeSetting = new Setting(containerEl)
+			.setName('Maximum chunk size before forcing chunking')
+			.setDesc(`Files larger than this size will be chunked (${this.plugin.settings.maxChunkSize || 1800} characters)`)
+			.addSlider(slider => {
+				const currentValue = this.plugin.settings.maxChunkSize || 1800;
+				slider
+					.setLimits(1000, 7000, 100)
+					.setValue(currentValue)
+					.setDynamicTooltip()
+					.onChange(async (value) => {
+						this.plugin.settings.maxChunkSize = value;
+						maxChunkSizeSetting.setDesc(`Files larger than this size will be chunked (${value} characters)`);
+						try {
+							await this.plugin.saveData(this.plugin.settings);
+							// Update button visibility when value changes
+							updateRedoButtonVisibility();
+						} catch (error) {
+							console.error('Error saving max chunk size setting:', error);
+							new Notice('Error saving max chunk size setting');
+						}
+					});
+			});
+
+		// Check if embedding file exists to show "Redo Affected Embeddings" button
+		const embeddingPath = this.plugin.getEmbeddingFilePath();
+		const embeddingFileExists = await this.plugin.app.vault.adapter.exists(embeddingPath);
+		
+		// Track initial value to detect changes
+		let initialMaxChunkSize = this.plugin.settings.maxChunkSize || 1800;
+		let redoButton: any = null;
+		
+		// Function to update button visibility
+		const updateRedoButtonVisibility = () => {
+			if (!redoButton) return;
+			
+			const currentValue = this.plugin.settings.maxChunkSize || 1800;
+			const valueChanged = currentValue !== initialMaxChunkSize;
+			const isEmbeddingActive = this.plugin.settings.embeddingOn && 
+				((this.plugin as any).isProcessingEmbeddingQueue || (this.plugin as any).embeddingQueue.size > 0);
+			
+			// Show button only if value changed AND embedding is not active
+			if (valueChanged && !isEmbeddingActive && embeddingFileExists) {
+				redoButton.buttonEl.style.display = '';
+			} else {
+				redoButton.buttonEl.style.display = 'none';
+			}
+		};
+		
+		if (embeddingFileExists) {
+			// Add button to the same setting row (initially hidden)
+			maxChunkSizeSetting.addButton(button => {
+				redoButton = button;
+				button
+					.setButtonText('Redo Affected Embeddings')
+					.setCta();
+				button.buttonEl.style.display = 'none'; // Initially hidden
+				
+				button.onClick(async () => {
+					button.setButtonText('Processing...');
+					button.setDisabled(true);
+					try {
+						const affectedCount = await this.plugin.redoAffectedEmbeddings();
+						if (affectedCount > 0) {
+							new Notice(`Removed ${affectedCount} embedding(s) for re-processing. Files will be re-embedded with the new chunk size limit.`);
+							// Update embedding progress if callback exists
+							if (this.plugin.embeddingProgressCallback) {
+								await this.plugin.embeddingProgressCallback();
+							}
+							// Reset initial value since we've processed the change
+							initialMaxChunkSize = this.plugin.settings.maxChunkSize || 1800;
+							updateRedoButtonVisibility();
+						} else {
+							new Notice('No embeddings need to be redone. All single-chunk files are within the current limit.');
+						}
+					} catch (error: any) {
+						console.error('Error redoing affected embeddings:', error);
+						new Notice(`Error: ${error.message || 'Failed to redo affected embeddings'}`);
+					} finally {
+						button.setDisabled(false);
+						button.setButtonText('Redo Affected Embeddings');
+						updateRedoButtonVisibility();
+					}
+				});
+			});
+			
+			// Set up periodic check for embedding status
+			const checkEmbeddingStatus = setInterval(() => {
+				updateRedoButtonVisibility();
+			}, 1000); // Check every second
+			
+			// Store interval ID for cleanup
+			(this as any).embeddingStatusCheckInterval = checkEmbeddingStatus;
+			
+			// Initial visibility check
+			updateRedoButtonVisibility();
+		}
+
 		// Embedding Toggle Button
 		const embeddingSetting = new Setting(containerEl)
 			.setName('Note Embedding')
@@ -2844,7 +3679,7 @@ class MarginaliaSettingTab extends PluginSettingTab {
 							await this.updateEmbeddingProgress(embeddingSetting);
 							new Notice(this.plugin.settings.embeddingOn 
 								? 'Note embedding activated' 
-								: 'Note embedding paused');
+								: 'Note embedding not active');
 						} catch (error) {
 							console.error('Error saving settings:', error);
 							new Notice('Error saving embedding state');
@@ -2852,12 +3687,38 @@ class MarginaliaSettingTab extends PluginSettingTab {
 					});
 			});
 
+		// Chunk Statistics Settings
+		const avgChunkLengthAllSetting = new Setting(containerEl)
+			.setName('Average chunk length in characters (including files with just 1 chunk)')
+			.setDesc('Calculating...');
+		
+		const avgChunkLengthMultiSetting = new Setting(containerEl)
+			.setName('Average chunk length in characters (excluding files with just 1 chunk)')
+			.setDesc('Calculating...');
+
+		// Update chunk statistics
+		const updateChunkStatistics = async () => {
+			try {
+				const stats = await this.plugin.getChunkStatistics();
+				avgChunkLengthAllSetting.setDesc(`${stats.avgLengthAll.toLocaleString()} characters`);
+				avgChunkLengthMultiSetting.setDesc(`${stats.avgLengthMultiChunk.toLocaleString()} characters`);
+			} catch (error) {
+				console.error('Error updating chunk statistics:', error);
+				avgChunkLengthAllSetting.setDesc('Error calculating statistics');
+				avgChunkLengthMultiSetting.setDesc('Error calculating statistics');
+			}
+		};
+
+		// Update statistics on initial load
+		await updateChunkStatistics();
+
 		// Update embedding progress display on initial load (await to ensure it completes)
 		await this.updateEmbeddingProgress(embeddingSetting);
 		
 		// Register callback with plugin to update progress after files are embedded
-		this.plugin.embeddingProgressCallback = () => {
-			this.updateEmbeddingProgress(embeddingSetting);
+		this.plugin.embeddingProgressCallback = async () => {
+			await this.updateEmbeddingProgress(embeddingSetting);
+			await updateChunkStatistics();
 		};
 
 		// Highlight Color Picker
@@ -3188,7 +4049,7 @@ class MarginaliaSettingTab extends PluginSettingTab {
 			if (this.plugin.settings.embeddingOn) {
 				descText = `Note embedding is active. Click to pause.`;
 			} else {
-				descText = `Note embedding is paused. Click to activate.`;
+				descText = `Note embedding is not active. Click to activate.`;
 			}
 			
 			if (progress.total > 0) {
@@ -3209,12 +4070,19 @@ class MarginaliaSettingTab extends PluginSettingTab {
 			console.error('Error updating embedding progress:', error);
 			embeddingSetting.setDesc(this.plugin.settings.embeddingOn 
 				? 'Note embedding is active. Click to pause.' 
-				: 'Note embedding is paused. Click to activate.');
+				: 'Note embedding is not active. Click to activate.');
 		}
 	}
 
 	onClose(): void {
 		// Clear embedding progress callback when settings tab closes
 		this.plugin.embeddingProgressCallback = null;
+		
+		// Clear embedding status check interval if it exists
+		const interval = (this as any).embeddingStatusCheckInterval;
+		if (interval) {
+			clearInterval(interval);
+			(this as any).embeddingStatusCheckInterval = null;
+		}
 	}
 }
