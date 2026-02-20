@@ -16,6 +16,10 @@ A powerful Obsidian plugin that allows you to add margin notes (marginalia) to y
 - **Automatic position adjustment**: Marginalia positions adjust automatically when you edit the note (add/remove lines)
 - **Overlap detection**: Prevents creating overlapping highlights
 
+<img width="560" height="413" alt="Screenshot 2026-02-20 at 9 21 23 AM" src="https://github.com/user-attachments/assets/28b216fd-267a-44ff-afd0-7f05cd1a65c3" />
+<img width="777" height="704" alt="Screenshot 2026-02-20 at 9 22 17 AM" src="https://github.com/user-attachments/assets/a00df679-8897-4a8a-847c-2689c72346a0" />
+
+
 ### Sidebar Panel
 
 - **Current Note tab**: View all marginalia in the active file
